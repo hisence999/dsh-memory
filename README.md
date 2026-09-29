@@ -16,6 +16,21 @@
 工具共五个：`memory_write` / `memory_edit` / `memory_archive` / `memory_log`（仅主 agent）、
 `memory_search`（主 agent 与子代理）。
 
+## 记忆面板
+
+会话区顶部除了「对话」「轨迹」，还有一个**「记忆」标签页**，把 `<项目根>/memory/` 下的 Markdown 真相源渲染出来。
+面板按**当前会话的工作区根**定位，跟着会话走，不需要额外配置。三个视图：
+
+| 视图 | 内容 |
+|---|---|
+| 记忆 | 按类型分组（约定 / 事实 / 流程 / 经验 + 归档），点条所在行内展开看字段与「详细」正文，可就地归档 / 恢复 |
+| 日志 | 按日期倒序的时间线，展开一条逐行显示它的全部字段 |
+| 图谱 | 节点 = 记忆（另可勾选日志节点成簇），连线 = 关联 / 取代 / 关联日志，节点可拖拽、点开在图下方看详情 |
+
+顶栏一行统计 `N 条 · 注入 X / Y 字`（有条目归档时再跟 `· 归档 M`）与三段预算条，右上角「刷新」——
+面板**不实时刷新**，会话内新写的记忆要刷新或重进视图才可见。面板自己**不写文件**：归档 / 恢复是把
+`/memory archive #0012 原因`（或 `/memory restore #0012`）交给宿主的 `/memory` 命令执行，落盘走插件既有的写入事务，**不经模型**。
+
 ## 目录结构
 
 **数据**（写在每个项目的根目录下；项目根 = 会话的工作区根）
@@ -44,12 +59,16 @@ INTERFACES.md       模块契约（唯一来源）
 ## 安装
 
 ```sh
+git clone https://github.com/hisence999/dsh-memory.git    # 克隆到本地，记下目录路径 <本仓库>
+
 # 不改 profile 的 overlay 试跑（推荐先这么做）
-dsh web --patch D:\dsh-memory-v2\cordis.patch.yml
+dsh web --patch <本仓库>/cordis.patch.yml
 
 # 正式装进某个 profile
-dsh plugin --profile <你的 profile> add D:\dsh-memory-v2
+dsh plugin --profile <你的 profile> add <本仓库>
 ```
+
+`<本仓库>` 指上一步克隆出来的本地目录路径；命令不依赖固定盘符，Windows 用 `\`、macOS / Linux 用 `/` 分隔即可。
 
 生效规则：
 
