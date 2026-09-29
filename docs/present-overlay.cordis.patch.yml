@@ -1,0 +1,4 @@
+# 冒烟用 overlay：把 present 工具插进来（只用于隔离 profile memory-smoke 的交付提醒验证）
+- insert:
+    - id: tool-present
+      name: '@deepseek-ai/dsh-tool-present'

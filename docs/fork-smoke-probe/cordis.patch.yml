@@ -1,0 +1,9 @@
+# fork-smoke-probe：只读冒烟探针的配置层。
+# 探针本身不改被测代码；它只在真实宿主里造一次会话 fork，再查 memory_* 的可见性。
+# outDir / buildLabel 优先由环境变量 FORK_SMOKE_OUT / FORK_SMOKE_LABEL 覆盖（同一份探针跑 A/B 两套 build）。
+- insert:
+    - id: fork-smoke-probe
+      name: fork-smoke-probe
+      config:
+        outDir: 'D:/dsh-memory-v2/.tmp-smoke'
+        buildLabel: '(env)'

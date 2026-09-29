@@ -1,0 +1,35 @@
+# dsh-memory（R1.4 实现）—— 组合包 patch 层
+#
+# 该层被 profile 的 dsh.profile.bundles 引用后生效，向配置树插入一行插件。
+# 覆盖配置：在 profile 的 cordis.patch.yml 里按 `- id: memory` 写新 config 即可。
+# ⚠️ patch 是**整行替换 config、不做深合并**，只想改一个键也要重述全部要保留的键。
+#
+# 设计文档：docs/memory-tools-design-r1.4.md（本工程的唯一行为依据）
+- insert:
+    - id: memory
+      name: dsh-memory
+      config:
+        enabled: true
+        memoryDirName: memory
+        # §9.3 注入预算（maxSnapshotChars 是**共享总额**：三段 + 表头 + 说明行都算在这 6000 里）
+        maxSnapshotChars: 9000
+        maxPinnedItems: 10
+        maxIndexItems: 100
+        # §9.2 日志标题注入（0 = 关闭该能力；只注入标题，正文永不进快照）
+        maxJournalItems: 100
+        # §5.6 长度上限
+        maxTitleChars: 160
+        detailMaxChars: 8000
+        itemMaxChars: 8600
+        # §7.4 单次 ids 上限
+        maxSearchLimit: 10
+        # §12 跨进程锁
+        lockTimeoutMs: 5000
+        staleLockMs: 60000
+        # §17 交付完成提醒
+        remindOnDelivery: true
+        completionIdleTurns: 1
+        reminderCooldownTurns: 1
+        reminderPrefix: "[记忆插件]"
+        # §7.0 子代理隔离（false = 严格隔离，仅逃生门）
+        includeSubagents: false

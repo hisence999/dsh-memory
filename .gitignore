@@ -1,0 +1,13 @@
+# 依赖
+node_modules/
+
+# 本项目专属记忆数据（本地会话记忆与日志，不入公开仓库）
+memory/
+
+# 本机备份产物
+backups/
+
+# 临时/系统文件
+*.log
+.DS_Store
+Thumbs.db

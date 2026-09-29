@@ -1,0 +1,13 @@
+{
+  "name": "fork-smoke-probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "只读冒烟探针：在真实宿主里造一次会话 fork，并用宿主自己的工具可见性解析器检查 memory_* 是否还在。",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

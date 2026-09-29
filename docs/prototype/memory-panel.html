@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>记忆面板 · 布局原型 v4</title>
+<style>
+  :root {
+    --bg: #1b1b1b; --bg-hover: #242424; --bg-sel: #262626; --bg-float: #202020;
+    --line: #2e2e2e; --line-soft: #262626; --line-strong: #3a3a3a;
+    --text: #e8e8e8; --dim: #9a9a9a; --faint: #6f6f6f;
+    --accent: #4f7cff;
+    --k-convention: #7aa2d8; --k-fact: #9d8cd8; --k-procedure: #5fb8a4; --k-lesson: #cfa14a; --k-archived: #6f6f6f;
+  }
+  html[data-theme='light'] {
+    --bg: #ffffff; --bg-hover: #f4f4f4; --bg-sel: #f0f0f0; --bg-float: #fafafa;
+    --line: #e4e4e4; --line-soft: #efefef; --line-strong: #d4d4d4;
+    --text: #1c1c1c; --dim: #6b6b6b; --faint: #9b9b9b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.6 system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; min-height: 0; }
+  .grow { flex: 1; }
+  button, input { font: inherit; color: inherit; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  .bar { display: flex; height: 2px; background: var(--line-soft); flex: 0 0 auto; }
+  .bar span { height: 100%; }
+
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 16px 10px; flex: 0 0 auto; }
+  header .title { font-size: 14px; font-weight: 600; }
+  header .stat { font-size: 12px; color: var(--dim); }
+  header .stat b { color: var(--text); font-weight: 500; }
+  .ghost { border: none; background: transparent; color: var(--dim); cursor: pointer; padding: 3px 7px; border-radius: 6px; font-size: 12px; }
+  .ghost:hover { background: var(--bg-hover); color: var(--text); }
+  .ghost[aria-pressed='true'] { color: var(--text); background: var(--bg-sel); }
+
+  nav { display: flex; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+  nav button { border: none; background: transparent; color: var(--dim); cursor: pointer; padding: 6px 0 8px; font-size: 13px; border-bottom: 1px solid transparent; margin-bottom: -1px; }
+  nav button[aria-selected='true'] { color: var(--text); border-bottom-color: var(--text); }
+  nav button .n { color: var(--faint); font-size: 11px; margin-left: 4px; }
+
+  main { flex: 1; min-height: 0; overflow: auto; }
+  .wrap { padding: 4px 0 28px; }
+
+  /* ── 记忆列表：分节细线 + 分组图标 ── */
+  .gh {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+    font-size: 12px; color: var(--dim); cursor: pointer; user-select: none;
+    background: var(--bg); border-bottom: 1px solid var(--line-soft);
+  }
+  .gh .ico { display: inline-flex; color: var(--faint); }
+  .gh .caret { margin-left: auto; color: var(--faint); transition: transform .12s; display: inline-flex; }
+  .gh[data-open='false'] .caret { transform: rotate(-90deg); }
+  .gh .cnt { color: var(--faint); }
+  .g-convention .ico { color: var(--k-convention); }
+  .g-fact .ico { color: var(--k-fact); }
+  .g-procedure .ico { color: var(--k-procedure); }
+  .g-lesson .ico { color: var(--k-lesson); }
+  .g-archived .ico { color: var(--k-archived); }
+
+  .r { display: flex; align-items: baseline; gap: 8px; padding: 6px 16px 6px 20px; cursor: pointer; border-left: 2px solid transparent; }
+  .r:hover { background: var(--bg-hover); }
+  .r[aria-expanded='true'] { background: var(--bg-sel); border-left-color: var(--accent); }
+  .r .id { font-size: 11.5px; color: var(--faint); flex: 0 0 auto; }
+  .r .t { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r .c { font-size: 11px; color: var(--faint); flex: 0 0 auto; }
+  .r .off { font-size: 11px; color: var(--k-archived); flex: 0 0 auto; }
+  .star { color: var(--k-lesson); }
+
+  /* 展开区：行内手风琴 */
+  .exp { padding: 2px 16px 14px 20px; background: var(--bg-sel); border-left: 2px solid var(--accent); }
+  .exp .meta { font-size: 12px; color: var(--dim); }
+  .exp .meta i { font-style: normal; color: var(--faint); margin: 0 6px; }
+  .exp .body { margin: 10px 0 0; font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; max-width: 860px; }
+  .exp .links { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+  .exp .links .lb { font-size: 11.5px; color: var(--faint); }
+  .lnk {
+    font-size: 11.5px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
+    color: var(--accent); background: transparent; cursor: pointer;
+  }
+  .lnk:hover { border-color: var(--accent); }
+  .exp .tags { margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .exp .acts { display: flex; gap: 6px; margin-top: 12px; }
+  .exp .acts input { flex: 0 1 240px; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; outline: none; font-size: 12px; }
+  .exp .acts input:focus { border-color: var(--line-strong); }
+  .exp .acts button { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; color: var(--dim); }
+  .exp .acts button:hover { background: var(--bg-hover); color: var(--text); }
+  .exp .acts button.danger { color: #e06c75; border-color: #4a2b2f; }
+
+  /* ── 日志时间线 ── */
+  .day { display: flex; align-items: center; gap: 10px; padding: 16px 16px 6px; font-size: 12px; color: var(--dim); }
+  .day .rule { flex: 1; height: 1px; background: var(--line-soft); }
+  .tl { position: relative; padding-left: 68px; }
+  .tl::before { content: ''; position: absolute; left: 56px; top: 4px; bottom: 6px; width: 1px; background: var(--line); }
+  .ev { position: relative; padding: 6px 16px 10px 0; cursor: pointer; }
+  .ev .t { position: absolute; left: -68px; width: 44px; text-align: right; font-size: 11px; color: var(--faint); padding-top: 3px; }
+  .ev::before { content: ''; position: absolute; left: -16px; top: 11px; width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
+  .ev[aria-expanded='true']::before { background: var(--accent); }
+  .ev .h { display: flex; align-items: baseline; gap: 8px; }
+  .ev .h .id { font-size: 11.5px; color: var(--faint); flex: 0 0 auto; }
+  .ev .h .ti { flex: 1; font-size: 13px; }
+  .ev .f { display: none; margin-top: 4px; font-size: 12px; color: var(--dim); }
+  .ev[aria-expanded='true'] .f { display: block; }
+  .ev .f b { color: var(--text); font-weight: 500; }
+
+  /* ── 记忆图谱 ── */
+  .graphbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px 0; }
+  .graphbar .hint { font-size: 11.5px; color: var(--faint); margin-left: auto; }
+  .graph { position: relative; }
+  svg.g { display: block; width: 100%; height: auto; }
+  .g .edge { stroke: var(--line-strong); stroke-width: 1; fill: none; opacity: .55; }
+  .g .edge.rel { stroke: var(--faint); opacity: .45; }
+  .g .edge.sup { stroke: var(--k-archived); stroke-dasharray: 3 3; opacity: .6; }
+  .g .edge.log { stroke: var(--k-procedure); opacity: .35; }
+  .g .edge.on { stroke: var(--accent); opacity: .95; stroke-width: 1.4; }
+  .g .node { cursor: grab; }
+  .g .node.dragging { cursor: grabbing; }
+  .g .node circle.hit { fill: transparent; stroke: none; }
+  .g .node circle.dot { fill: var(--bg); stroke-width: 1.4; }
+  .g .node text { font: 9.5px/1 ui-monospace, Menlo, Consolas, monospace; fill: var(--faint); pointer-events: none; user-select: none; }
+  .g .node.dim { opacity: .22; }
+  .g .node.on circle.dot { stroke-width: 2.2; }
+  .g .node.on text { fill: var(--text); }
+  .g .cluster text { font: 10px/1 system-ui, sans-serif; fill: var(--faint); letter-spacing: .5px; }
+  .gcap { display: flex; align-items: baseline; gap: 8px; padding: 2px 16px 10px; font-size: 12px; color: var(--dim); min-height: 24px; }
+  .gcap b { color: var(--text); font-weight: 500; }
+  .gdetail { padding: 0 16px 20px; }
+  .gdetail .ghd { display: flex; align-items: center; gap: 8px; padding-bottom: 4px; }
+  .gdetail .ghd .who { font-size: 12px; color: var(--faint); }
+
+  .empty { padding: 24px 16px; color: var(--faint); font-size: 12px; }
+  .proto { flex: 0 0 auto; padding: 5px 16px; font-size: 11px; color: var(--faint); border-top: 1px solid var(--line-soft); }
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(6px); background: var(--bg-float); border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; font-size: 12px; opacity: 0; pointer-events: none; transition: .16s; z-index: 9; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="bar" id="bar"></div>
+
+  <header>
+    <span class="title">记忆</span>
+    <span class="stat" id="stat"></span>
+    <span class="grow"></span>
+    <button class="ghost" id="theme">明暗</button>
+    <button class="ghost" id="refresh">刷新</button>
+  </header>
+
+  <nav>
+    <button id="tab-memory" aria-selected="true">记忆<span class="n" id="n-memory"></span></button>
+    <button id="tab-journal" aria-selected="false">日志<span class="n" id="n-journal"></span></button>
+    <button id="tab-graph" aria-selected="false">图谱</button>
+  </nav>
+
+  <main id="view-memory"><div class="wrap" id="list"></div></main>
+  <main id="view-journal" style="display:none"><div class="wrap" id="timeline"></div></main>
+  <main id="view-graph" style="display:none">
+    <div class="graphbar">
+      <button class="ghost" id="g-journal" aria-pressed="false">含日志</button>
+      <button class="ghost" id="g-rel" aria-pressed="true">关联</button>
+      <button class="ghost" id="g-reset">重置布局</button>
+      <span class="hint">拖动可移动节点 · 圆点大小 = 单条注入字数</span>
+    </div>
+    <div class="graph" id="graph"></div>
+    <div class="gcap" id="gcap"></div>
+    <div class="gdetail" id="gdetail"></div>
+  </main>
+
+  <div class="proto">原型 · 数据：真实标题/类型/标签/状态 + 样例关系与字段</div>
+  <div class="toast" id="toast"></div>
+</div>
+
+<script>
+const KIND_ORDER = ['convention', 'fact', 'procedure', 'lesson'];
+const KIND_LABEL = { convention: '约定', fact: '事实', procedure: '流程', lesson: '经验', archived: '归档' };
+const ICON = {
+  convention: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M4.2 2.6h7.6v11l-3.8-2.5-3.8 2.5z"/></svg>',
+  fact: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6"/><path d="M8 7.4v3.4M8 5.4v.7" stroke-linecap="round"/></svg>',
+  procedure: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="3.6" cy="8" r="1.5"/><circle cx="12.4" cy="8" r="1.5"/><path d="M5.1 8h5.2M9.6 6.4 11.4 8l-1.8 1.6"/></svg>',
+  lesson: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M8 2.4a4.1 4.1 0 0 0-2.5 7.4v1.5h5V9.8A4.1 4.1 0 0 0 8 2.4z"/><path d="M6.4 13.4h3.2" stroke-linecap="round"/></svg>',
+  archived: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M2.6 6h10.8v7H2.6z"/><path d="M2 3.4h12V6H2z"/></svg>',
+  caret: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>',
+};
+
+// 数据：真实标题/类型/状态/标签；rel（关联）/supersedes/supersededBy/links（日志）为样例关系
+const ENTRIES = [
+  ['#0019','fact','DSH 插件加 client 半边：package.json 的 exports["./client"] + dsh.client，产物是手写 classic script（无需打包器）','active','medium','confirmed','2026-09-29',['dsh','client-plugin','plugin-api','打包'],'两边都要声明：exports["./client"] 与 dsh.client = { platform:"web", inject:[…] }；客户端文件是普通 classic script（window.__ModuleLoader__.load({id:"<包名>", factory})），id 必须等于包名；只能 require 平台种子模块（react 等），故无需声明 external；无 JSX，因此可维持「零构建、源码即产物」。',['#0020','#0021','#0025'],null,null,[]],
+  ['#0020','fact','对话窗视图标签条的扩展点是 conversation.view 槽（chat=0 / trajectory=10），注册签名与轨迹插件同形','active','medium','confirmed','2026-09-29',['dsh','client-plugin','slot'],'「轨迹」不是内部实现，而是注册进 conversation.view 的一条视图；新面板取 order=20 即排在轨迹右侧；session 作用域组件 props 带 sessionId。',['#0019','#0024'],null,null,[]],
+  ['#0021','fact','客户端读工作区文件用 ctx.remote.workspaceFiles.list/read；read 应只发 offset 不发 limit','active','medium','confirmed','2026-09-29',['dsh','remote','workspaceFiles'],'注入名按点号原样写 remote.workspaceFiles；路径可为工作区相对路径；不要发 limit：页长由宿主 maxLines 决定，超限抛 gateway/bad-request。',['#0019','#0025'],null,null,[]],
+  ['#0022','fact',"宿主插件取可选服务要用 ctx.inject(['x'], cb).call 形式，且不要写进 export const inject",'active','medium','confirmed','2026-09-29',['dsh','cordis','inject'],"inject 是 Context 上的方法，解引用会丢 this，真机抛 Cannot read properties of undefined；deferred inject 则服务缺席时自动降级。",['#0021'],null,null,[]],
+  ['#0023','lesson','node:vm 里执行代码得到的对象属于另一个 realm，assert.deepStrictEqual 会因原型不同误判','active','medium','confirmed','2026-09-29',['node-vm','测试','realm'],'跨 realm 比较前先搬回宿主 realm（Array.from 或递归 toHost）。',['#0019'],null,null,[]],
+  ['#0024','convention','UI/布局改动先做自包含 HTML 原型评审，确认后再改插件源码','active','high','confirmed','2026-09-29',['工程约定','原型','UI'],'原型放 docs/prototype/，单文件无外部依赖，页内标明真实/样例数据边界。',['#0020','#0025'],null,null,[]],
+  ['#0025','fact','记忆面板的注入字数客户端可估算（格式固定），但预算分母 maxSnapshotChars 必须由宿主透出','active','medium','confirmed','2026-09-29',['dsh-memory','注入预算','面板'],'注入格式固定为 [#0019] 事实 · 标题 / [J-…] 标题，读到文件即可算；maxSnapshotChars 是插件配置，宿主的 workspaceFiles 面不读配置。',['#0021','#0024'],null,null,[]],
+  ['#0018','fact',"DSH V4 会话格式硬拒 source.kind === 'plugin'，插件自产消息必须用生产者自有 kind",'active','medium','confirmed','2026-09-28',['dsh','session-format'],'新写法为 plugin:<插件名> 或自有 kind。',[],null,null,['J-20260928-1942','J-20260928-1944']],
+  ['#0015','fact','dsh-memory 的子代理判定只看 origin/delegationDepth，fork 顶层会话按主会话放行','active','medium','confirmed','2026-09-26',['dsh-memory','子代理'],'',['#0016','#0017','#0010'],null,null,['J-20260926-2129']],
+  ['#0014','fact','dsh-memory 已整层移除 A/B 固定提示词，注入只含会话边界快照（主/子代理逐字一致）','active','medium','confirmed','2026-09-25',['dsh-memory','注入'],'',[],'#0012',null,['J-20260925-2022']],
+  ['#0001','fact','dsh 装插件必须先 dsh plugin add，只加 --patch 会解析不到包','active','medium','confirmed','2026-09-20',['dsh','plugin'],'',['#0002'],null,null,[]],
+  ['#0002','fact','dsh 的 profile 只能指定一次：位置参数与 --profile 不能同时给','active','medium','confirmed','2026-09-20',['dsh','profile'],'',['#0001'],null,null,[]],
+  ['#0003','fact','memory_search 搜归档区要 includeArchived:true 且 status:"all"','active','medium','confirmed','2026-09-20',['dsh-memory','检索'],'',[],null,null,[]],
+  ['#0007','fact','本机"移到回收站"式删除的可用写法（PowerShell）','active','medium','confirmed','2026-09-20',['清理','powershell'],"FileSystem::DeleteFile($path,'OnlyErrorDialogs','SendToRecycleBin')。",['#0006'],null,null,[]],
+  ['#0008','fact','dsh-memory 的会话边界快照现在会把项目日志标题也注入（只注入标题，正文仍需检索）','active','medium','confirmed','2026-09-20',['dsh-memory','注入','日志'],'',[],null,null,['J-20260920-1824']],
+  ['#0009','fact','GUI 的 web profile 把 dsh-memory 软链到源码（link:），改插件源码后必须重启 profile 才生效','active','medium','confirmed','2026-09-20',['dsh','profile'],'',['#0005'],null,null,['J-20260920-1752']],
+  ['#0012','fact','dsh-memory 固定提示词已按用户手改定稿（两版 1201/322 字，且不再含 present 指引）','superseded','medium','confirmed','2026-09-20',['dsh-memory','提示词'],'已被后续改造取代，保留供追溯。',[],null,'#0014',['J-20260920-2055']],
+  ['#0006','procedure','清理隔离 profile 前先摘掉 node_modules 里指向插件源码的符号链接','active','medium','confirmed','2026-09-20',['清理','profile'],'',['#0007'],null,null,['J-20260920-1752']],
+  ['#0011','procedure','确认真机是否已用上新 build：看新会话注入文本里有没有你的改动，不要写探针数据试守卫','active','medium','confirmed','2026-09-20',['dsh','验证'],'',['#0013'],null,null,[]],
+  ['#0016','lesson','血缘字段会被别的机制复用：parentSession 既是子代理也是会话 fork 的标记','active','medium','confirmed','2026-09-26',['血缘','fork'],'',['#0015'],null,null,[]],
+  ['#0017','lesson','用探针插件做宿主级冒烟时：agents.create() 返回 AgentHandle，必须回查 ctx.agents.get(id)','active','medium','confirmed','2026-09-26',['探针','冒烟'],'',['#0015'],null,null,[]],
+  ['#0004','lesson','记忆插件的自产状态最容易误报，只有真机跑完整流程才暴露','active','medium','confirmed','2026-09-20',['测试','真机'],'',['#0013'],null,null,[]],
+  ['#0010','lesson','需要结果才能继续的复核类子代理必须同步派发：后台子代理不能 send_message 寻址也轮询不到','active','medium','confirmed','2026-09-20',['子代理','后台'],'',['#0015'],null,null,[]],
+  ['#0013','convention','写 memory_* 的 detail 只用单行／分号分段，别用空行或 - 项目符号分行','active','high','confirmed','2026-09-20',['dsh-memory','detail'],'空行会终止条目；以 - 开头的续行会被解析成字段或无法归类的行；落盘后工具再也清不掉且逐代累积。',['#0004','#0011'],null,null,['J-20260920-1829']],
+  ['#0005','convention','本项目以 D:\\dsh-memory-v2 为实现、D:\\dsh-memory-design 为设计','archived','medium','confirmed','2026-09-20',['项目','路径'],'归档原因：设计目录已并入本仓库 docs/。',['#0009'],null,null,[]],
+];
+
+const JOURNALS = [
+  ['J-20260929-1350','2026-09-29','13:50','原型 v3：按 DSH 极简设计重写（去搜索/去卡片/去图例，统计收顶栏，六项结构断言全过）',[['结果','结构断言全过']]],
+  ['J-20260929-1345','2026-09-29','13:45','记忆面板布局原型 v2：注入预算条 + 分类折叠 + 日志时间线，并用 vm.Script 语法自检抓到一个内联脚本语法错',[['结果','原型交付']]],
+  ['J-20260929-1329','2026-09-29','13:29','给 dsh-memory 加「记忆面板」：备份→契约→三队友并行→独立复核→修 P1/P2→全绿',[['结果','456 用例全绿'],['关联记忆','#0019 #0020 #0021 #0022 #0023']]],
+  ['J-20260928-1944','2026-09-28','19:44','修完 dsh-memory 交付提醒的 source.kind P0（改为 plugin:memory），测试 399 绿、typecheck 无错',[['关联记忆','#0018']]],
+  ['J-20260928-1942','2026-09-28','19:42',"定位 dsh-memory 交付提醒 P0：V3 遗留的 source.kind='plugin' 被 V4 原生准入拒绝",[['关联记忆','#0018']]],
+  ['J-20260926-2129','2026-09-26','21:29','修复 fork 顶层会话误判子代理的 unknown tool P0，并做真机 A/B 冒烟',[['关联记忆','#0015']]],
+  ['J-20260925-2022','2026-09-25','20:22','把 dsh-memory 注入精简为只有会话边界快照（主/子代理逐字一致，子代理只读建快照）',[['关联记忆','#0014']]],
+  ['J-20260920-2055','2026-09-20','20:55','按用户手改定稿固定提示词，查证 present 出处后不再重复',[['关联记忆','#0012']]],
+  ['J-20260920-1829','2026-09-20','18:29','重启后真机验证通过 + 修正 4 处文档，并坦白一次多行 detail 写入事故',[['关联记忆','#0013']]],
+  ['J-20260920-1824','2026-09-20','18:24','给 dsh-memory 加"日志标题注入"并同步设计/文档/测试，实测 389 全绿',[['关联记忆','#0008']]],
+  ['J-20260920-1752','2026-09-20','17:52','清理冒烟临时目录与隔离 profile（符号链接先摘除）',[['关联记忆','#0006 #0009']]],
+].map(([id, date, time, title, fields]) => ({ id, date, time, title, fields }));
+
+const MEMORY = ENTRIES.map(([id, kind, title, status, priority, confidence, created, tags, detail, rel, supersedes, supersededBy, links]) => ({
+  id, kind, title, status, priority, confidence, created, tags, detail, rel, supersedes, supersededBy, links,
+  pinned: id === '#0013',
+}));
+const byId = (id) => MEMORY.find((e) => e.id === id);
+
+// ── 注入估算 ──
+const BUDGET = 9000;
+const idxCost = (e) => ('[' + e.id + '] ' + KIND_LABEL[e.kind] + ' · ' + e.title).length + 1;
+const logCost = (j) => ('[' + j.id + '] ' + j.title).length + 1;
+const injectable = () => MEMORY.filter((e) => e.status === 'active' || e.status === 'candidate');
+const num = (n) => n.toLocaleString('en-US').replace(/,/g, ' ');
+function stats() {
+  const pinned = injectable().filter((e) => e.pinned).reduce((n, e) => n + idxCost(e), 0);
+  const index = injectable().reduce((n, e) => n + idxCost(e), 0) + 16;
+  const journal = JOURNALS.reduce((n, x) => n + logCost(x), 0) + 110;
+  return { pinned, index, journal, total: pinned + index + journal };
+}
+
+const state = { tab: 'memory', open: new Set(['convention', 'fact', 'procedure', 'lesson']), expanded: '#0019', openEvents: new Set(), graph: { logs: false, rel: true, hover: null, sel: null, cache: null } };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function render() {
+  const s = stats();
+  $('stat').innerHTML = '<b>' + MEMORY.length + '</b> 条 · 注入 <b>' + num(s.total) + '</b> / ' + num(BUDGET) + ' 字';
+  $('n-memory').textContent = MEMORY.length;
+  $('n-journal').textContent = JOURNALS.length;
+  $('bar').innerHTML =
+    '<span style="background:var(--k-lesson);width:' + (s.pinned / BUDGET) * 100 + '%"></span>' +
+    '<span style="background:var(--accent);width:' + (s.index / BUDGET) * 100 + '%"></span>' +
+    '<span style="background:var(--k-procedure);width:' + (s.journal / BUDGET) * 100 + '%"></span>';
+  ['memory', 'journal', 'graph'].forEach((t) => {
+    $('view-' + t).style.display = state.tab === t ? 'block' : 'none';
+    $('tab-' + t).setAttribute('aria-selected', state.tab === t);
+  });
+  if (state.tab === 'memory') renderList();
+  if (state.tab === 'journal') renderTimeline();
+  if (state.tab === 'graph') renderGraph();
+}
+
+function renderList() {
+  const groups = KIND_ORDER.map((k) => [k, MEMORY.filter((e) => e.kind === k && e.status !== 'archived')])
+    .concat([['archived', MEMORY.filter((e) => e.status === 'archived')]]);
+  let html = '';
+  groups.forEach(([k, list]) => {
+    if (!list.length) return;
+    const open = state.open.has(k);
+    const cost = list.reduce((n, e) => n + idxCost(e), 0);
+    html += '<div class="gh g-' + k + '" data-toggle="' + k + '" data-open="' + open + '">' +
+      '<span class="ico">' + ICON[k] + '</span><span>' + KIND_LABEL[k] + '</span>' +
+      '<span class="cnt">' + list.length + ' · ' + cost + ' 字</span>' +
+      '<span class="caret">' + ICON.caret + '</span></div>';
+    if (!open) return;
+    list.forEach((e) => {
+      const exp = state.expanded === e.id;
+      html += '<div class="r" data-id="' + e.id + '" aria-expanded="' + exp + '">' +
+        '<span class="id">' + (e.pinned ? '<span class="star">★</span> ' : '') + e.id + '</span>' +
+        '<span class="t">' + esc(e.title) + '</span>' +
+        (e.status === 'superseded' ? '<span class="off">已取代</span>' : '') +
+        '<span class="c">' + idxCost(e) + '</span></div>';
+      if (!exp) return;
+      html += detailHtml(e);
+    });
+  });
+  $('list').innerHTML = html;
+}
+
+function detailHtml(e) {
+  const links = [];
+  if (e.rel && e.rel.length) links.push('<span class="lb">关联</span>' + e.rel.map((r) => '<button class="lnk" data-jump="' + r + '">' + r + '</button>').join(''));
+  if (e.supersedes) links.push('<span class="lb">取代</span><button class="lnk" data-jump="' + e.supersedes + '">' + e.supersedes + '</button>');
+  if (e.supersededBy) links.push('<span class="lb">被取代</span><button class="lnk" data-jump="' + e.supersededBy + '">' + e.supersededBy + '</button>');
+  if (e.links && e.links.length) links.push('<span class="lb">日志</span>' + e.links.map((j) => '<button class="lnk" data-journal="' + j + '">' + j + '</button>').join(''));
+  const archived = e.status === 'archived';
+  return '<div class="exp" data-exp="' + e.id + '">' +
+    '<div class="meta">' + [e.id, KIND_LABEL[e.kind], e.status, e.priority, e.created, idxCost(e) + ' 字'].join('<i>·</i>') + '</div>' +
+    '<p class="body">' + (e.detail ? esc(e.detail) : '<span style="color:var(--faint)">无</span>') + '</p>' +
+    (e.tags.length ? '<div class="tags">' + e.tags.join(' · ') + '</div>' : '') +
+    (links.length ? '<div class="links">' + links.join('') + '</div>' : '') +
+    '<div class="acts"><input placeholder="归档原因（可选）" />' +
+    '<button data-act="' + (archived ? 'restore' : 'archive') + '"' + (archived ? '' : ' class="danger"') + '>' + (archived ? '恢复' : '归档') + '</button>' +
+    '<button data-act="ask">在对话中修改</button></div></div>';
+}
+
+function renderTimeline() {
+  const days = [...new Set(JOURNALS.map((j) => j.date))].sort().reverse();
+  let html = '';
+  days.forEach((d) => {
+    const list = JOURNALS.filter((j) => j.date === d);
+    html += '<div class="day">' + d + '<span class="rule"></span><span class="cnt" style="color:var(--faint)">' + list.length + '</span></div><div class="tl">';
+    list.forEach((j) => {
+      const open = state.openEvents.has(j.id);
+      html += '<div class="ev" data-ev="' + j.id + '" aria-expanded="' + open + '">' +
+        '<div class="t mono">' + j.time + '</div>' +
+        '<div class="h"><span class="id">' + j.id + '</span><span class="ti">' + esc(j.title) + '</span></div>' +
+        '<div class="f">' + (j.fields.map(([k, v]) => '<div><b>' + k + '</b> ' + esc(v) + '</div>').join('') || '<div style="color:var(--faint)">无字段</div>') + '</div></div>';
+    });
+    html += '</div>';
+  });
+  $('timeline').innerHTML = html || '<div class="empty">没有日志</div>';
+}
+
+// ═══ 记忆图谱：确定性分簇布局（约定/事实/流程/经验/归档 五簇，可选日志簇） ═══
+const W = 900, H = 560;
+const CENTERS = {
+  convention: [150, 150], fact: [450, 180], procedure: [740, 130],
+  lesson: [270, 420], archived: [600, 420], journal: [780, 420],
+};
+const kindOf = (e) => (e.status === 'archived' ? 'archived' : e.kind);
+const colorOf = (k) => ({ convention: 'var(--k-convention)', fact: 'var(--k-fact)', procedure: 'var(--k-procedure)', lesson: 'var(--k-lesson)', archived: 'var(--k-archived)', journal: 'var(--k-procedure)' }[k]);
+const rOf = (c) => Math.max(6, Math.min(17, 5 + Math.sqrt(c) / 2.4));
+
+function layout() {
+  const nodes = [];
+  const groups = {};
+  MEMORY.forEach((e) => { (groups[kindOf(e)] = groups[kindOf(e)] || []).push(e); });
+  Object.keys(groups).forEach((k) => {
+    const [cx, cy] = CENTERS[k];
+    const list = groups[k];
+    list.forEach((e, i) => {
+      const ring = Math.floor(i / 6), idx = i % 6, cnt = Math.min(6, list.length - ring * 6);
+      const r = 34 + ring * 30;
+      const a = (idx / Math.max(1, cnt)) * Math.PI * 2 - Math.PI / 2;
+      nodes.push({ id: e.id, kind: k, label: e.id, x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r * 0.82, r: rOf(idxCost(e)), entry: e });
+    });
+  });
+  if (state.graph.logs) {
+    const [cx, cy] = CENTERS.journal;
+    JOURNALS.forEach((j, i) => {
+      const ring = Math.floor(i / 7), idx = i % 7, cnt = Math.min(7, JOURNALS.length - ring * 7);
+      const r = 30 + ring * 28;
+      const a = (idx / Math.max(1, cnt)) * Math.PI * 2 - Math.PI / 2;
+      nodes.push({ id: j.id, kind: 'journal', label: j.id.slice(2, 15), x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r * 0.82, r: 5, entry: j });
+    });
+  }
+  const pos = {}; nodes.forEach((n) => { pos[n.id] = n; });
+  const edges = [];
+  const seen = new Set();
+  const add = (a, b, type) => {
+    if (!pos[a] || !pos[b]) return;
+    const key = [a, b].sort().join('|') + type;
+    if (seen.has(key)) return;
+    seen.add(key);
+    edges.push({ a, b, type });
+  };
+  MEMORY.forEach((e) => {
+    if (state.graph.rel) { (e.rel || []).forEach((r) => add(e.id, r, 'rel')); }
+    if (e.supersedes) add(e.id, e.supersedes, 'sup');
+    if (state.graph.logs) (e.links || []).forEach((j) => add(e.id, j, 'log'));
+  });
+  return { nodes, edges, pos };
+}
+
+// 缓存布局：节点坐标放在 cache 里，拖动后不被重算；切换开关时保留已拖动坐标
+function ensureGraph(reset) {
+  const prev = reset ? null : state.graph.cache;
+  if (!prev || prev.logs !== state.graph.logs || prev.rel !== state.graph.rel) {
+    const g = layout();
+    const old = prev ? prev.pos : null;
+    if (old) g.nodes.forEach((n) => { const p = old[n.id]; if (p) { n.x = p.x; n.y = p.y; } });
+    g.pos = {};
+    g.nodes.forEach((n) => { g.pos[n.id] = n; });
+    g.logs = state.graph.logs;
+    g.rel = state.graph.rel;
+    state.graph.cache = g;
+  }
+  return state.graph.cache;
+}
+
+function paintGraph(g) {
+  if (!g) return;
+  const focus = (drag && drag.id) || state.graph.hover || state.graph.sel;
+  const near = new Set();
+  if (focus) { near.add(focus); g.edges.forEach((e) => { if (e.a === focus) near.add(e.b); if (e.b === focus) near.add(e.a); }); }
+  let svg = '<svg class="g" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet">';
+  ['convention', 'fact', 'procedure', 'lesson', 'archived'].concat(state.graph.logs ? ['journal'] : []).forEach((k) => {
+    const c = CENTERS[k];
+    const cy0 = (k === 'journal' || k === 'lesson' || k === 'archived') ? c[1] + 108 : c[1] - 118;
+    svg += '<g class="cluster"><text x="' + (c[0] - 30) + '" y="' + cy0 + '" text-anchor="middle">' + (k === 'journal' ? '日志' : KIND_LABEL[k]) + '</text></g>';
+  });
+  g.edges.forEach((e) => {
+    const A = g.pos[e.a], B = g.pos[e.b];
+    const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2 - Math.abs(A.x - B.x) * 0.08 - 10;
+    const on = focus && (e.a === focus || e.b === focus);
+    svg += '<path class="edge ' + e.type + (on ? ' on' : '') + '" d="M' + A.x + ' ' + A.y + ' Q' + mx + ' ' + my + ' ' + B.x + ' ' + B.y + '"/>';
+  });
+  g.nodes.forEach((n) => {
+    const dim = focus && !near.has(n.id);
+    const dragging = drag && drag.id === n.id;
+    svg += '<g class="node' + (dim ? ' dim' : '') + (focus === n.id ? ' on' : '') + (dragging ? ' dragging' : '') + '" data-node="' + n.id + '">' +
+      '<circle class="hit" cx="' + n.x + '" cy="' + n.y + '" r="' + (n.r + 7) + '"/>' +
+      '<circle class="dot" cx="' + n.x + '" cy="' + n.y + '" r="' + n.r + '" stroke="' + colorOf(n.kind) + '"' +
+      (n.kind === 'archived' ? ' stroke-dasharray="3 2"' : '') + '/>' +
+      '<text x="' + (n.x + n.r + 4) + '" y="' + (n.y + 3.5) + '">' + n.label + '</text></g>';
+  });
+  svg += '</svg>';
+  $('graph').innerHTML = svg;
+}
+
+function renderGraph() {
+  const g = ensureGraph(false);
+  paintGraph(g);
+  const hover = state.graph.hover;
+  const hoverEnt = hover ? (byId(hover) || JOURNALS.find((j) => j.id === hover)) : null;
+  $('gcap').innerHTML = hoverEnt
+    ? '<b>' + hoverEnt.id + '</b> ' + esc(hoverEnt.title)
+    : '<span style="color:var(--faint)">点节点看详情 · 拖动可移动 · 连线的两端是关联关系</span>';
+  const e = state.graph.sel ? byId(state.graph.sel) : null;
+  $('gdetail').innerHTML = e
+    ? '<div class="ghd"><span class="who">' + e.id + ' · 详情</span><span class="grow"></span>' +
+      '<button class="lnk" data-jump="' + e.id + '">在记忆里打开</button>' +
+      '<button class="ghost" data-gclose="1">关闭</button></div>' + detailHtml(e)
+    : '';
+}
+
+let toastTimer;
+const toast = (m) => { const t = $('toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1800); };
+
+// ── 图谱拖动：pointerdown 抓取 → pointermove 改坐标 → pointerup 定夺（未移动则算点击） ──
+let drag = null, dragFrame = 0;
+function svgMetrics() {
+  const svg = $('graph').querySelector('svg');
+  if (!svg) return null;
+  const rect = svg.getBoundingClientRect();
+  return { rect, sx: W / rect.width, sy: H / rect.height };
+}
+function schedulePaint() {
+  if (dragFrame) return;
+  dragFrame = requestAnimationFrame(() => { dragFrame = 0; paintGraph(state.graph.cache); });
+}
+
+document.addEventListener('pointerdown', (ev) => {
+  if (state.tab !== 'graph') return;
+  const t = ev.target;
+  const node = t instanceof Element ? t.closest('[data-node]') : null;
+  if (!node) return;
+  const m = svgMetrics();
+  if (!m) return;
+  const id = node.dataset.node, p = state.graph.cache.pos[id];
+  drag = { id, dx: p.x - (ev.clientX - m.rect.left) * m.sx, dy: p.y - (ev.clientY - m.rect.top) * m.sy, moved: false };
+  ev.preventDefault();
+});
+
+document.addEventListener('pointermove', (ev) => {
+  if (!drag) return;
+  const m = svgMetrics();
+  if (!m) return;
+  const p = state.graph.cache.pos[drag.id];
+  const nx = (ev.clientX - m.rect.left) * m.sx + drag.dx;
+  const ny = (ev.clientY - m.rect.top) * m.sy + drag.dy;
+  if (Math.abs(nx - p.x) > 2 || Math.abs(ny - p.y) > 2) drag.moved = true;
+  p.x = Math.max(18, Math.min(W - 18, nx));
+  p.y = Math.max(18, Math.min(H - 18, ny));
+  schedulePaint();
+}, { passive: true });
+
+document.addEventListener('pointerup', () => {
+  if (!drag) return;
+  const id = drag.id, moved = drag.moved;
+  drag = null;
+  if (moved) { paintGraph(state.graph.cache); return; }
+  state.graph.sel = state.graph.sel === id ? null : id;
+  renderGraph();
+});
+
+document.addEventListener('click', (ev) => {
+  const t = ev.target;
+  if (!(t instanceof Element)) return;
+  const gh = t.closest('[data-toggle]'), row = t.closest('[data-id]'), act = t.closest('[data-act]');
+  const jump = t.closest('[data-jump]'), jl = t.closest('[data-journal]'), evRow = t.closest('[data-ev]');
+  if (t.closest('[data-gclose]')) {
+    state.graph.sel = null; renderGraph();
+  } else if (gh) {
+    const k = gh.dataset.toggle; state.open.has(k) ? state.open.delete(k) : state.open.add(k); renderList();
+  } else if (act) {
+    const host = act.closest('[data-exp]');
+    const e = byId(host ? host.dataset.exp : state.expanded);
+    const a = act.dataset.act;
+    toast(a === 'archive' ? '/memory archive ' + e.id : a === 'restore' ? '/memory restore ' + e.id : '在对话里预填：修改 ' + e.id + ' …');
+  } else if (jump) {
+    const id = jump.dataset.jump, e = byId(id);
+    if (!e) return;
+    state.tab = 'memory'; state.expanded = id; state.open.add(kindOf(e)); render();
+    const el = document.querySelector('[data-id="' + id + '"]');
+    if (el) el.scrollIntoView({ block: 'center' });
+  } else if (jl) {
+    state.tab = 'journal'; state.openEvents.add(jl.dataset.journal); render();
+  } else if (row) {
+    state.expanded = state.expanded === row.dataset.id ? null : row.dataset.id; renderList();
+  } else if (evRow) {
+    const id = evRow.dataset.ev; state.openEvents.has(id) ? state.openEvents.delete(id) : state.openEvents.add(id); renderTimeline();
+  }
+});
+
+document.addEventListener('mouseover', (ev) => {
+  if (drag) return;
+  const node = ev.target instanceof Element ? ev.target.closest('[data-node]') : null;
+  if (!node || state.graph.hover === node.dataset.node) return;
+  state.graph.hover = node.dataset.node; renderGraph();
+});
+document.addEventListener('mouseout', (ev) => {
+  if (drag) return;
+  const node = ev.target instanceof Element ? ev.target.closest('[data-node]') : null;
+  if (!node || state.graph.hover !== node.dataset.node) return;
+  state.graph.hover = null; renderGraph();
+});
+
+$('tab-memory').addEventListener('click', () => { state.tab = 'memory'; render(); });
+$('tab-journal').addEventListener('click', () => { state.tab = 'journal'; render(); });
+$('tab-graph').addEventListener('click', () => { state.tab = 'graph'; render(); });
+$('g-journal').addEventListener('click', (e) => { state.graph.logs = !state.graph.logs; e.currentTarget.setAttribute('aria-pressed', state.graph.logs); renderGraph(); });
+$('g-rel').addEventListener('click', (e) => { state.graph.rel = !state.graph.rel; e.currentTarget.setAttribute('aria-pressed', state.graph.rel); renderGraph(); });
+$('g-reset').addEventListener('click', () => { state.graph.cache = null; state.graph.sel = null; renderGraph(); toast('布局已重置'); });
+$('refresh').addEventListener('click', () => toast('重新读取 memory/'));
+$('theme').addEventListener('click', () => { const r = document.documentElement; r.dataset.theme = r.dataset.theme === 'dark' ? 'light' : 'dark'; });
+
+render();
+</script>
+</body>
+</html>
