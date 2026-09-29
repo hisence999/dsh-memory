@@ -87,3 +87,7 @@ dsh plugin --profile <你的 profile> add <本仓库>
 pnpm test        # node --test，纯逻辑 + 装配层双层测试
 pnpm typecheck   # tsc --checkJs --strict（零运行时依赖，源码即产物）
 ```
+
+## 致谢
+
+感谢 [linux.do](https://linux.do/) 社区。
