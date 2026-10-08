@@ -27,12 +27,13 @@ import {
   onTurnStart,
 } from './delivery.js';
 import { buildReminderMessage } from './reminder-text.js';
+import { createToggleState } from './memory-toggle.js';
 import * as dedup from './dedup.js';
 import * as sensitive from './sensitive.js';
 import * as errors from './errors.js';
 import { createWriteTool } from './tools/write.js';
 import { createEditTool } from './tools/edit.js';
-import { createArchiveTool, createMemoryCommand } from './tools/archive.js';
+import { applyMemoryToolGate, createArchiveTool, createMemoryCommand, liftMemoryToolGate } from './tools/archive.js';
 import { createSearchTool } from './tools/search.js';
 import { createLogTool } from './tools/log.js';
 
@@ -110,6 +111,17 @@ export function apply(ctx, rawConfig) {
   /** @type {Map<string, ReturnType<typeof createDeliveryState>>} */
   const deliveryStates = new Map();
   const allowlist = createAllowlist();
+  /** 每会话「记忆开关」表：缺席 = 开（只有显式关过的会话留痕，不跨重启保留）。 */
+  const toggleState = createToggleState();
+  /**
+   * 会话 → 关闭记忆时施加的 `restrict` 撤销器。
+   *
+   * 为什么需要记住它：`restrict` 有两个调用点——`agent/created`（会话创建时就已是关闭态）
+   * 与 `/memory off`（会话运行中关闭）。`/memory on` 必须调用**施加时返回的那个 disposer**
+   * 才能精确撤销；重复叠加只会取交集、越叠越摘不掉。表里每个会话最多一条活记录。
+   * @type {Map<string, () => void>}
+   */
+  const toggleRestrictors = new Map();
 
   // ───────────────────────── 工具注册 ─────────────────────────
 
@@ -144,6 +156,10 @@ export function apply(ctx, rawConfig) {
     },
     writeToolNames: WRITE_TOOL_NAMES,
     searchToolName: SEARCH_TOOL_NAME,
+    /** 每会话记忆开关表：命令层读它、改它；注入层与工具层读它（task-1 的跨层契约）。 */
+    toggleState,
+    /** 关闭记忆时施加的 restrict 撤销器表：命令层据它精确撤销（见上面的字段说明）。 */
+    toggleRestrictors,
   };
 
   for (const factory of [createWriteTool, createEditTool, createArchiveTool, createSearchTool, createLogTool]) {
@@ -187,6 +203,9 @@ export function apply(ctx, rawConfig) {
 
   // ───────────── 注入内容：只有 C 层会话边界快照（A/B 固定说明已按用户要求整层移除） ─────────────
 
+  // 会话级闸门（task-1）：该会话若已用 `/memory off` 关掉记忆，注入必须**零内容**。
+  // 返回空串是实测最干净的做法（不注入任何标签/空白残渣）；这与下面"没有快照就返回空串"
+  // 是同一条路径，所以关闭态不需要另建一套求值分支。
   ctx.effect(() =>
     ctx.systemPrompt.context({
       name: PROMPT_NAME,
@@ -198,6 +217,9 @@ export function apply(ctx, rawConfig) {
           );
           const sessionId = typeof scope?.id === 'string' ? scope.id : undefined;
           if (sessionId === undefined) return '';
+
+          // 关闭记忆：本会话不注入任何记忆内容（其余工具面不受影响）
+          if (!toggleState.isOn(sessionId)) return '';
 
           // 只读缓存：主会话与子代理都只在**自己的会话边界**写这份文本（§9.1 会话内不重注入）。
           // 没有快照就注入空串——"边界尚未处理完""目录不可读""会话已清理"都落在这里：
@@ -249,6 +271,14 @@ export function apply(ctx, rawConfig) {
       const sessionId = agent?.id;
       if (typeof sessionId !== 'string') return;
       const header = agent?.session?.header;
+
+      // 记忆开关（task-1）：会话创建时若已是关闭态（宿主复用 id、或命令之后又走了一次边界），
+      // 就把五个记忆工具从**这个 agent** 的可见面摘掉。必须在工具注册之后——`restrict` 会校验
+      // 名字是已知的全局工具，未注册时直接抛错；apply() 里那轮注册是同步的，这里必然晚于它。
+      // 与 `/memory off` 共用 `applyMemoryToolGate`（同一份实现、同一套日志与撤销器登记）。
+      if (!toggleState.isOn(sessionId)) {
+        applyMemoryToolGate(deps, agent, sessionId);
+      }
 
       // 子代理：把四个写入类工具从它的可见面里摘掉（§7.0），并建一份**只读**快照供注入
       // （不再有主/子两套固定说明——注入内容两角色一致，都是快照块）。
@@ -378,6 +408,14 @@ export function apply(ctx, rawConfig) {
       if (typeof sessionId !== 'string' || !allowlist.has(sessionId)) return;
       if (payload?.signal?.aborted === true) return;
 
+      // 记忆开关（review P0-1）：关闭态会话**绝不能**收到交付提醒。
+      // 两个理由，各自都足以致命：
+      //   ① 口径要求"不注入任何记忆内容"——提醒是一条真实的 steer 用户消息，含当日记忆文件路径
+      //      与"调用 memory_write / memory_log"的指令，属于注入；
+      //   ② 提醒点名的两个工具已被闸门摘掉，模型照着调用会撞 `unknown tool`（本仓库 2026-09-26
+      //      踩过同类 P0，见 identity.js 文件头）。
+      if (!toggleState.isOn(sessionId)) return;
+
       const turn = Number(payload?.turn);
       // `Number(null)`／`Number('')` 都是 0：必须显式要求正整数
       if (!Number.isInteger(turn) || turn <= 0) {
@@ -438,6 +476,20 @@ export function apply(ctx, rawConfig) {
       snapshots.delete(sessionId);
       deliveryStates.delete(sessionId);
       boundaryWarnings.delete(sessionId);
+      // restrict 的撤销器随会话一起释放：agent 自己的 scoped effect 通常已随 agent 撤销，
+      // 这里再调一次是幂等兜底，避免表里留死记录。
+      liftMemoryToolGate(deps, sessionId);
+      // ⚠️ 这里**刻意不清** `toggleState`（review P1-1）。
+      //
+      // 用户口径是"关闭后本会话就一直不生效"，而 `agent/disposed` 的触发面比"会话结束"窄得多：
+      // 它只在 agent 自己的 fiber 被 dispose 时发出（`dsh-agent/lib/index.js:537-545`），
+      // 常规的会话切换 / 关标签页都不经过它。若在这里清状态，一旦发生"agent 销毁后同 id 重建"
+      // （例如恢复会话），状态会**静默回到开启**、注入恢复，而客户端缓存仍显示"已关"——
+      // 用户以为关着、实际在工作，正是本功能最不能出的错。
+      //
+      // 代价：关闭过的会话 id 会一直留在表里（每个 id 一个 Set 项）。这是有界且极小的开销，
+      // 且随 DSH 进程结束一起消失（口径本来就不跨重启）。清痕迹的理由（"id 复用串味"）在本
+      // 仓库不成立——会话 id 是 `session-${randomUUID()}`（`dsh-api-session-controller/lib/index.js:688`）。
     } catch (error) {
       ctx.logger.warn(`memory: agent/disposed 处理失败 ${describeError(error)}`);
     }

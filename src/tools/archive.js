@@ -10,8 +10,13 @@
  * 两条入口——`memory_archive` 工具与宿主 `/memory` 命令——共用本文件的
  * `runArchiveAction`：归档/恢复一律经 `deps.applyBatch` → store 的锁、编号水位与
  * `INDEX.md` 重建；命令层**不新增任何文件操作**（task-1 的硬约束）。
+ *
+ * 另外三个命令子命令（`on` / `off` / `status`）**不碰任何文件**：开关表在内存里
+ * （`src/memory-toggle.js`），关闭时只改两件事——注入返回空串（`src/index.js`）与
+ * 五个工具从该会话可见面消失（`restrict`，只能经 `agent.ctx`）。
  */
 
+import { TOGGLE_TOOL_NAMES, toggleResultText, toggleVerbOf, withToggleUsage } from '../memory-toggle.js';
 import { asRecord, asStringList, boundarySectionText, canonicalId, checkCall, defineMemoryTool, failResult, joinSections, modulesOf, nowOf, okResult, storeWarningsSection, takeBoundaryWarnings, throwParamError, todayOf, workspaceOf, warningsSection } from './shared.js';
 
 const TOOL = 'memory_archive';
@@ -204,15 +209,28 @@ export const MEMORY_COMMAND_NAME = 'memory';
 
 /**
  * 用法说明：空输入、未知子命令、缺编号都返回它（**绝不抛错**）。
- * 语法冻结（task-1）：`/memory archive <#NNNN> [原因文本...]`、`/memory restore <#NNNN>`。
+ * 语法冻结（task-1）：`/memory archive <#NNNN> [原因文本...]`、`/memory restore <#NNNN>`、
+ * `/memory on|off|status`（后三个由共享契约 `withToggleUsage` 并进来，本文件不再手写）。
  */
-export const MEMORY_COMMAND_USAGE = [
-  '[memory] 用法说明',
-  '做了什么：本次没有改动任何条目。',
-  '用法：/memory archive <#NNNN> [原因文本...] —— 归档（移入 memory/archive/，不是删除，可恢复）',
-  '用法：/memory restore <#NNNN> —— 恢复（按归档前状态回填）',
-  '下一步建议：编号形如 #0012；archive 的原因文本可省略，restore 不需要原因。',
-].join('\n');
+export const MEMORY_COMMAND_USAGE = withToggleUsage(
+  [
+    '[memory] 用法说明',
+    '做了什么：本次没有改动任何条目。',
+    '用法：/memory archive <#NNNN> [原因文本...] —— 归档（移入 memory/archive/，不是删除，可恢复）',
+    '用法：/memory restore <#NNNN> —— 恢复（按归档前状态回填）',
+    '下一步建议：编号形如 #0012；archive 的原因文本可省略，restore 不需要原因。',
+  ].join('\n'),
+);
+
+/**
+ * `status` 子命令的状态标记：**机器可判定**，客户端按这两个字符串初始化开关 UI
+ * （跨半边契约，task-1：`/memory status` 的返回文本里必须固定含其中之一）。
+ */
+export const TOGGLE_STATUS_ON_TEXT = '状态：记忆已开启';
+export const TOGGLE_STATUS_OFF_TEXT = '状态：记忆已关闭';
+
+/** `/memory status` 的动词（不是开关动词，`toggleVerbOf` 不认它，故单独判定）。 */
+const TOGGLE_STATUS_VERB = 'status';
 
 /**
  * 解析 `/memory` 之后的原始输入。
@@ -220,13 +238,21 @@ export const MEMORY_COMMAND_USAGE = [
  * 依据宿主契约：`CommandInvocation.rawInput` 是"命令名之后的**原样**文本，含分隔空白"
  * （`@deepseek-ai/dsh-commands/lib/types/index.d.ts:24`），所以先 `trim` 再切词。
  *
- * 返回三态，调用方据此决定 `CommandResult.kind`：
+ * 返回五态，调用方据此决定 `CommandResult.kind`：
  *   - `usage`：空输入或未知子命令 → 按 task-1 要求**成功**返回用法说明；
  *   - `invalid`：已知子命令但缺编号 → 按 `error` 返回用法说明；
- *   - `op`：`{ action, id, reason? }` 交给共享实现（编号是否合法由 `canonicalId` 判定）。
+ *   - `op`：`{ action, id, reason? }` 交给共享实现（编号是否合法由 `canonicalId` 判定）；
+ *   - `toggle`：`{ on }` —— `/memory on|off`（动词判定交给共享契约 `toggleVerbOf`，大小写与空白都吃）；
+ *   - `status`：只读查询，**解析层不做任何状态读写**（无副作用是硬要求）。
+ *
+ * 解析层只回答"用户想干什么"，不碰开关表、不碰工具面——改状态与施加/撤销 restrict 全在 handler 里。
  *
  * @param {unknown} rawInput
- * @returns {{ kind: 'usage', text: string } | { kind: 'invalid', text: string } | { kind: 'op', action: 'archive'|'restore', id: string, reason?: string }}
+ * @returns {{ kind: 'usage', text: string }
+ *   | { kind: 'invalid', text: string }
+ *   | { kind: 'op', action: 'archive'|'restore', id: string, reason?: string }
+ *   | { kind: 'toggle', on: boolean }
+ *   | { kind: 'status' }}
  */
 export function parseMemoryCommand(rawInput) {
   const text = typeof rawInput === 'string' ? rawInput.trim() : '';
@@ -234,6 +260,11 @@ export function parseMemoryCommand(rawInput) {
 
   const tokens = text.split(/\s+/);
   const verb = (tokens[0] ?? '').toLowerCase();
+
+  const toggleOn = toggleVerbOf(verb);
+  if (toggleOn !== undefined) return { kind: 'toggle', on: toggleOn };
+  if (verb === TOGGLE_STATUS_VERB) return { kind: 'status' };
+
   if (verb !== 'archive' && verb !== 'restore') return { kind: 'usage', text: MEMORY_COMMAND_USAGE };
 
   const id = tokens[1];
@@ -255,20 +286,39 @@ export function parseMemoryCommand(rawInput) {
  * handler 内部**必须** try/catch：任何异常都转成 `{kind:'error', text}`，绝不外抛
  * （宿主会把抛出的 handler 记成失败并写 `command/done`，但面板拿不到可读文案）。
  *
- * @param {any} deps INTERFACES §3.12 的冻结形状
+ * 五个子命令的分工：`archive`/`restore` 走 store；`on`/`off` 改本会话开关并**立即**对齐工具面；
+ * `status` **只读**（客户端拿它初始化开关 UI，必须幂等且零副作用）。
+ *
+ * @param {any} deps INTERFACES §3.12 的冻结形状 + `toggleState`（每会话记忆开关表，装配层注入）
  * @returns {import('../../types/dsh.d.ts').CommandDefinitionShape}
  */
 export function createMemoryCommand(deps) {
   return {
     name: MEMORY_COMMAND_NAME,
-    description: '归档或恢复长期记忆（等价于 memory_archive 工具，复用同一份 store 逻辑）',
-    input: { hint: 'archive <#NNNN> [原因文本...] | restore <#NNNN>' },
+    description: '归档或恢复长期记忆（等价于 memory_archive 工具，复用同一份 store 逻辑）；on/off/status 开关本会话记忆',
+    input: { hint: 'archive <#NNNN> [原因文本...] | restore <#NNNN> | on | off | status' },
     /** @param {import('../../types/dsh.d.ts').CommandInvocationShape} invocation */
     async handler(invocation) {
       try {
         const parsed = parseMemoryCommand(invocation?.rawInput);
         if (parsed.kind === 'usage') return { kind: 'success', text: parsed.text };
         if (parsed.kind === 'invalid') return { kind: 'error', text: parsed.text };
+
+        // 三个开关子命令的会话闸门：
+        //   - `on` / `off` 是**写入类**（改状态、动工具面）→ 走完整闸门，与工具路径逐字同口径；
+        //   - `status` 是**只读**查询，客户端要靠它初始化开关 UI，**必须总能拿到状态标记**，
+        //     所以按本仓库对只读路径的既有约定用 `allowAnySession`（与 `memory_search` 同一档：
+        //     只要求有会话上下文）。它仍然只读：不写状态、不施加/撤销 restrict、不碰文件。
+        if (parsed.kind === 'status') {
+          const sessionId = checkCall(deps, { agent: invocation?.agent, signal: invocation?.signal }, TOOL, {
+            allowAnySession: true,
+          });
+          return { kind: 'success', text: toggleStatusText(deps, sessionId) };
+        }
+        if (parsed.kind === 'toggle') {
+          const sessionId = checkCall(deps, { agent: invocation?.agent, signal: invocation?.signal }, TOOL);
+          return { kind: 'success', text: applyToggle(deps, invocation?.agent, sessionId, parsed.on) };
+        }
 
         const sessionId = checkCall(deps, { agent: invocation?.agent, signal: invocation?.signal }, TOOL);
         const result = await runArchiveAction(deps, {
@@ -284,6 +334,244 @@ export function createMemoryCommand(deps) {
       }
     },
   };
+}
+
+/**
+ * `/memory status` 的返回文本：**只读**，不改开关、不施加/撤销 restrict、不碰任何文件。
+ *
+ * 跨半边契约（task-1）：状态行**固定**写成 `状态：记忆已开启` / `状态：记忆已关闭`
+ * ——客户端 `session.command('/memory status')` 后按这两个字符串判定开关 UI 的初始位置。
+ * 因此这一行必须原样出现在文本里（前缀/后缀都不行），改一个字就等于改协议。
+ *
+ * @param {any} deps 装配层注入的 deps（读 `deps.toggleState`）
+ * @param {string} sessionId
+ * @returns {string}
+ */
+export function toggleStatusText(deps, sessionId) {
+  const on = toggleStateOf(deps).isOn(sessionId);
+  return [
+    '[memory] 记忆开关状态',
+    on ? TOGGLE_STATUS_ON_TEXT : TOGGLE_STATUS_OFF_TEXT,
+    on
+      ? '结果：本会话正在注入记忆快照，五个 memory_* 工具可见可用。'
+      : '结果：本会话不注入任何记忆内容，五个 memory_* 工具不可见（记忆文件未被改动）。',
+    // 两个动词都写出来（客户端/用户都按"可切换"理解），但建议项按当前状态给，避免"已关还建议你关"
+    on
+      ? '下一步建议：需要本会话不启用记忆时，用 /memory off 关闭。'
+      : '下一步建议：需要恢复时用 /memory on 开启；本会话的关闭状态不跨重启保留（重启 DSH 后回到开启）。',
+  ].join('\n');
+}
+
+/**
+ * `/memory on|off` 的落笔：改开关 → 对齐工具面 → 返回文案。
+ *
+ * 为什么这里也要动工具面：命令是会话**运行中**执行的，而另一处施加点 `agent/created` 只在
+ * 会话创建时跑过一次（那时还没关过记忆），不会替它摘——所以 `/memory off` 必须当场施加，
+ * `/memory on` 必须调用同一份 disposer 撤销。时序与失败口径的完整说明见 `applyMemoryToolGate`。
+ *
+ * 施加/撤销都**只记 warn 不外抛**：命令绝不能因为工具面操作失败而让用户看不到开关结果。
+ * 文案里仍然照实说状态已改（开关表与 restrict 是两件事：前者决定注入，后者决定工具可见面）。
+ *
+ * @param {any} deps
+ * @param {any} agent `invocation.agent`（restrict 只能经它的 ctx）
+ * @param {string} sessionId
+ * @param {boolean} on
+ * @returns {string}
+ */
+export function applyToggle(deps, agent, sessionId, on) {
+  const state = toggleStateOf(deps);
+  const changed = state.set(sessionId, on);
+
+  if (on) {
+    liftMemoryToolGate(deps, sessionId);
+  } else if (changed || !hasMemoryToolGate(deps, sessionId)) {
+    // 只在"状态真的变了"或"该会话还没有活闸门"时施加：
+    //   - 重复 /memory off 不该再叠一层限制（`restrict` 的限制层取交集，越叠越摘不掉）；
+    //   - 但若状态已是关、却没有活闸门（例如上一轮 `agent.ctx` 不可用导致施加失败），
+    //     这里补一次，让命令具备自愈性——否则"关掉了但工具还在"会一直留在那儿。
+    // 施加函数内部也会先撤销旧记录再施加新的一条。
+    applyMemoryToolGate(deps, agent, sessionId);
+  }
+
+  return toggleResultText(on, changed);
+}
+
+/**
+ * 该会话当前是否有活着的记忆工具闸门（诊断 + 幂等判据）。
+ *
+ * @param {any} deps
+ * @param {string} sessionId
+ * @returns {boolean}
+ */
+function hasMemoryToolGate(deps, sessionId) {
+  const map = deps?.toggleRestrictors;
+  return map instanceof Map && map.has(sessionId);
+}
+
+/**
+ * 施加"五个记忆工具不可见"的会话级闸门，并记住撤销器。
+ *
+ * **时序理由（关键联动，task-1 第 6 条）**：`tools.restrict` 只在 `agent.ctx` 上生效
+ * （全局 ctx 会抛错），所以它有两处调用点，缺一不可：
+ *   ① `agent/created`：会话**创建时**若已是关闭态，摘掉五个工具；
+ *   ② `/memory off`：命令是会话**运行中**执行的，会话创建时还没关过记忆，① 不会替它摘，
+ *      所以关闭动作必须当场施加。
+ * 两处都走本函数，保证日志措辞、失败行为、撤销器登记完全一致（"静默降级"是 task-1 明令要防的）。
+ *
+ * 撤销器存进 `deps.toggleRestrictors`（装配层创建、与会话同寿命的 Map）：`/memory on` 与
+ * `agent/disposed` 靠它**精确**撤销。**先撤销旧记录再施加新的**——`restrict()` 每次调用
+ * 返回一条独立限制层的撤销器，叠加只会取交集，撤销不掉旧的。
+ *
+ * @param {any} deps 装配层注入的 deps（读 `deps.toggleRestrictors`，写 `deps.ctx.logger.warn`）
+ * @param {any} agent `invocation.agent` 或 `agent/created` 的 agent（restrict 只能经它的 ctx）
+ * @param {string} sessionId
+ * @returns {void}
+ */
+export function applyMemoryToolGate(deps, agent, sessionId) {
+  const restrictors = deps?.toggleRestrictors;
+  if (!(restrictors instanceof Map)) {
+    // 没有可追踪的撤销器表：**不施加**。施加了也撤不掉（`/memory on` 找不到 disposer），
+    // 那会让"关掉再打开"变成单向门——失败方向固定在不碰工具面这一侧。
+    warnFnOf(deps)('memory: 缺少 toggleRestrictors 表，未隐藏五个 memory_* 工具（工具仍然可见；注入已按关闭处理）');
+    return;
+  }
+  const stale = restrictors.get(sessionId);
+  if (stale !== undefined) {
+    restrictors.delete(sessionId);
+    restoreMemoryTools(stale, warnFnOf(deps));
+  }
+  const dispose = disableMemoryTools(agent, warnFnOf(deps));
+  // 失败时**不登记**：表里只放"真的还活着"的闸门，这样重复 /memory off 会自然重试，
+  // 而不是留下一条管不住的记录把重试也挡掉。
+  if (dispose !== null) restrictors.set(sessionId, dispose);
+}
+
+/**
+ * 撤销该会话的记忆工具闸门（**幂等**：没有记录时什么也不做）。
+ *
+ * @param {any} deps
+ * @param {string} sessionId
+ * @returns {void}
+ */
+export function liftMemoryToolGate(deps, sessionId) {
+  const restrictors = deps?.toggleRestrictors;
+  if (!(restrictors instanceof Map)) return;
+  const dispose = restrictors.get(sessionId);
+  // 先删再调：disposer 抛错时表里不能留一条已经死掉的记录（否则下次 on 会去调它）
+  restrictors.delete(sessionId);
+  restoreMemoryTools(dispose, warnFnOf(deps));
+}
+
+/**
+ * 把五个 `memory_*` 工具从**这个 agent** 的可见面摘掉，返回撤销器。
+ *
+ * 三条硬约束（task-1，缺一条就在真机上变成"工具还在"或"整插件加载失败"）：
+ *   (a) **只能在 `agent.ctx` 上调**：`dsh-tools` 的 `restrict()` 拿不到作用域上下文会直接抛
+ *       "tools.restrict() requires a scoped context (agent.ctx)"（`dsh-tools/lib/index.js:2895-2897`）；
+ *   (b) **只能在工具注册之后调**：`restrict()` 会校验名字必须是"已知的全局工具"，
+ *       未注册的名字直接抛错（同文件 `:2906-2908`）——本插件五个工具在 `apply()` 里同步注册，
+ *       所以 `agent/created` 与命令 handler 两个调用点都晚于注册；
+ *   (c) **失败必须 warn 且写明"工具仍然可见"**：静默降级是真机排查黑洞（`restrictSubagentTools`
+ *       的教训）。这里把级别提到 warn，并把失败后果（工具仍然可见）写进日志原文。
+ *
+ * 失败返回 `null`（而不是 no-op 撤销器）：调用方据此**不登记**这条闸门，
+ * 于是重复关闭会自然重试，而不是留下一条管不住的记录把重试也挡掉。
+ *
+ * 导出原因：装配层（`src/index.js` 的 `agent/created`）与命令层（`/memory off`）要用**同一份**
+ * 实现，否则两条路径的日志措辞与失败行为会漂移（这正是 task-1 要防的"静默降级"）。
+ *
+ * @param {any} agent
+ * @param {(message: string) => void} [warn] 告警出口（装配层传 ctx.logger.warn）
+ * @returns {(() => void)|null} 撤销器；失败时 null
+ */
+export function disableMemoryTools(agent, warn) {
+  const log = typeof warn === 'function' ? warn : () => {};
+  const scoped = agent?.ctx;
+
+  // ⚠️ 两条真机教训（2026-10-08 端到端冒烟抓出，单测桩测不到）：
+  //
+  // ① `ctx` 是 cordis 的 Proxy，读一个**该 fiber 没有 inject 过**的服务名会**抛错**而不是
+  //    返回 undefined：`cannot get property "tools" without inject`（`cordis/lib/index.js:676`）。
+  //    所以 `scoped.tools` 这句本身就可能抛，**必须整段在 try 里**；
+  //    写成 `if (scoped?.tools?.restrict === undefined)` 会让异常逃出函数。
+  //    真机形态下它是能解析的——`agent.ctx = createScope(loopCtx, agent).ctx`，而 AgentLoop
+  //    声明了 `static inject = [..., 'tools', ...]`（`dsh-agent-loop/lib/index.js:1524-1531`），
+  //    所以**直接属性访问是正确姿势**。
+  //
+  // ② **不要改用 `scoped.inject(['tools'], cb)` 去取服务**：该回调**不在同步栈上执行**
+  //    （实测：`inject()` 返回 Fiber，回调要 await 之后才跑到），同步函数里拿到的是 undefined，
+  //    结果是"闸门永远施加不上"——比 ① 更隐蔽。本函数是同步的，故只能直接属性访问。
+  try {
+    if (scoped === undefined || scoped === null || typeof scoped !== 'object') {
+      log('memory: 会话上下文不可用，无法隐藏五个 memory_* 工具（工具仍然可见；注入已按关闭处理）');
+      return null;
+    }
+    const tools = scoped.tools;
+    if (tools === undefined || tools === null || typeof tools.restrict !== 'function') {
+      log('memory: 会话上下文不可用，无法隐藏五个 memory_* 工具（工具仍然可见；注入已按关闭处理）');
+      return null;
+    }
+    const dispose = tools.restrict({ deny: [...TOGGLE_TOOL_NAMES] });
+    return typeof dispose === 'function' ? dispose : () => {};
+  } catch (error) {
+    log(`memory: 隐藏五个 memory_* 工具失败（工具仍然可见；注入已按关闭处理）${describeError(error)}`);
+    return null;
+  }
+}
+
+/**
+ * 撤销一次 `disableMemoryTools` 施加的限制（**幂等**，调用方可重复调）。
+ *
+ * @param {(() => void)|null|undefined} dispose
+ * @param {(message: string) => void} [warn]
+ * @returns {void}
+ */
+export function restoreMemoryTools(dispose, warn) {
+  if (typeof dispose !== 'function') return;
+  try {
+    dispose();
+  } catch (error) {
+    const log = typeof warn === 'function' ? warn : () => {};
+    log(`memory: 撤销记忆工具限制失败（五个 memory_* 工具可能仍然不可见）${describeError(error)}`);
+  }
+}
+
+/**
+ * 取 deps 上的开关表。
+ *
+ * 缺省时**现造一个空的**：`isOn` 恒为 true、`set` 恒为 false，于是"没有开关表"退化成
+ * "记忆一直开着、命令改不动状态"——失败方向固定在**不静默关掉用户记忆**这一侧
+ * （与 `memory-toggle.js` 的"缺席 = 开"同一口径）。装配层总会注入真的那一份。
+ *
+ * @param {any} deps
+ * @returns {{ isOn: (sessionId: string) => boolean, set: (sessionId: string, on: boolean) => boolean, clear: (sessionId: string) => void, size: () => number }}
+ */
+function toggleStateOf(deps) {
+  const state = deps?.toggleState;
+  if (state !== undefined && state !== null && typeof state.isOn === 'function' && typeof state.set === 'function') return state;
+  return { isOn: () => true, set: () => false, clear: () => {}, size: () => 0 };
+}
+
+/**
+ * 命令层的告警出口：走 `deps.ctx.logger.warn`（测试桩也实现了 warn），没有就静默。
+ *
+ * @param {any} deps
+ * @returns {(message: string) => void}
+ */
+function warnFnOf(deps) {
+  const logger = deps?.ctx?.logger;
+  if (logger !== undefined && typeof logger.warn === 'function') {
+    return (/** @type {string} */ message) => logger.warn(message);
+  }
+  return () => {};
+}
+
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+function describeError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
