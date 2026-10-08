@@ -17,6 +17,7 @@ import path from 'node:path';
 
 import { apply, inject, name, WRITE_TOOL_NAMES } from '../src/index.js';
 import { resolveConfig } from '../src/config.js';
+import { TOGGLE_TOOL_NAMES } from '../src/memory-toggle.js';
 
 /** 本测试自己造的临时工作区，跑完统一清理（只删自己创建的那些）。 */
 /** @type {string[]} */
@@ -589,4 +590,371 @@ test('§14.62 子代理永不提醒：即使它有交付信号也不 steer', asy
   );
   await host.fire('agent/turn-stopping', { agent: child, turn: 1, signal: new AbortController().signal });
   assert.equal(child.steered.length, 0, '子代理不得收到提醒');
+});
+
+// ─────────────────── 每会话「记忆开关」的闸门（task-1 宿主侧） ───────────────────
+
+/**
+ * 造一个**能真的记住 restrict 调用**的宿主桩（记忆开关测试专用）。
+ *
+ * 与 `makeHost` 的区别有两处：
+ *   1. `restrict` 记录实参并返回**真实的撤销器**（撤销时把记录标记为已解除），
+ *      于是"关闭 → 施加 / 开启 → 撤销"这条时序链可以在测试里被逐字验证；
+ *   2. 补上 `ctx.inject(['commands'], …)` 与 `commands.register`，让 `/memory` 命令注册起来
+ *      （`makeHost` 是旧宿主线形状，没有这两个东西，命令面根本不注册）。
+ */
+function makeToggleHost() {
+  const base = makeHost();
+  /** @type {Array<{ target: string, filter: any, live: boolean }>} */
+  const restrictions = [];
+  /** @type {any[]} */
+  const commands = [];
+
+  /**
+   * @param {string} target 记录来源（会话 id）
+   * @returns {{ tools: { restrict: (filter: any) => () => void } }}
+   */
+  const scopedToolsOf = (target) => ({
+    tools: {
+      restrict: (filter) => {
+        const record = { target, filter, live: true };
+        restrictions.push(record);
+        return () => {
+          record.live = false;
+        };
+      },
+    },
+  });
+
+  // 与 `test/command-memory.test.js` 同形的 inject 桩：`inject` 是 Context 上的方法，
+  // 实现体用 `this`；解引用后直接调用会丢 `this`，命令就注册不上。
+  const ctx = /** @type {any} */ (base.ctx);
+  ctx.commands = {
+    register: (definition) => {
+      commands.push(definition);
+      return () => {};
+    },
+  };
+  ctx.inject = function stubInject(deps, callback) {
+    const childCtx = { ...this };
+    if (!deps.includes('commands')) delete childCtx.commands;
+    callback(childCtx);
+    return { dispose: () => {} };
+  };
+
+  return {
+    ...base,
+    restrictions,
+    commands,
+    /** 用带记录能力的 ctx 重建一个主会话 agent。 */
+    /** @param {string} id @param {string} cwd @param {Record<string, unknown>} [header] */
+    makeScopedAgent(id, cwd, header = {}) {
+      const agent = makeAgent(id, cwd, header);
+      agent.ctx = scopedToolsOf(id);
+      return agent;
+    },
+    /** 该会话当前活着的限制条数。 */
+    /** @param {string} target */
+    liveCount(target) {
+      return restrictions.filter((item) => item.target === target && item.live).length;
+    },
+    /** 该会话历史上一共施加过几次限制。 */
+    /** @param {string} target */
+    totalCount(target) {
+      return restrictions.filter((item) => item.target === target).length;
+    },
+  };
+}
+
+test('记忆开关：关闭后注入为零（空串），且不再注入任何记忆内容', async () => {
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-off', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  const before = host.promptFor(agent);
+  assert.match(before, /project_memory_snapshot/, '关闭前必须有注入（回归前提）');
+
+  // 走命令关掉：注入必须立刻变成空串（零残渣）
+  const definition = host.commands[0];
+  assert.ok(definition, '/memory 命令必须已注册');
+  const result = await definition.handler({
+    commandId: 'c-off',
+    agent,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.kind, 'success', String(result.text));
+  assert.equal(host.promptFor(agent), '', '关闭后注入必须是空串（零注入，不留标签/空白残渣）');
+  assert.ok(!host.promptFor(agent).includes('project_memory_snapshot'), '关闭后不得再有快照标签');
+});
+
+test('记忆开关：关闭后 agent.ctx.tools.restrict 被以五个工具名调用（deny，不带 allow）', async () => {
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-restrict', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  assert.equal(host.restrictions.length, 0, '未关闭前不得 restrict 记忆工具（回归：默认开启）');
+
+  await host.commands[0].handler({
+    commandId: 'c-off',
+    agent,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+
+  const mine = host.restrictions.filter((item) => item.target === 's-toggle-restrict');
+  assert.equal(mine.length, 1, '关闭必须恰好施加一次 restrict');
+  assert.deepEqual(mine[0].filter.deny, [...TOGGLE_TOOL_NAMES], '必须以五个记忆工具名 deny');
+  assert.equal(mine[0].filter.allow, undefined, '不得出现 allow（会连带隐藏 bash/read 等）');
+  assert.equal(host.liveCount('s-toggle-restrict'), 1, '关闭后闸门必须是活的');
+});
+
+test('记忆开关：会话创建时已是关闭态 → agent/created 就施加 restrict（会话级闸门）', async () => {
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+
+  // 先在一个会话里关掉，再让同 id 的会话走一次边界（宿主复用 id / 命令后再次边界）
+  const first = host.makeScopedAgent('s-toggle-same-id', workspace);
+  await host.fire('agent/created', { agent: first, source: 'startup' });
+  await host.commands[0].handler({
+    commandId: 'c-off',
+    agent: first,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+
+  const again = host.makeScopedAgent('s-toggle-same-id', workspace);
+  await host.fire('agent/created', { agent: again, source: 'startup' });
+  assert.equal(host.liveCount('s-toggle-same-id'), 1, '边界重入时仍应恰好一条活闸门（不叠加）');
+  assert.equal(host.promptFor(again), '', '关闭态会话重入边界后依然零注入');
+});
+
+test('记忆开关：restrict 失败必须 warn 且写明「工具仍然可见」（不得静默降级）', async () => {
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-fail', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  // 模拟真机上 restrict 抛错（例如名字未注册 / 上下文不对）
+  agent.ctx.tools.restrict = () => {
+    throw new Error('boom');
+  };
+  const result = await host.commands[0].handler({
+    commandId: 'c-off-fail',
+    agent,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.kind, 'success', '工具面失败不得让用户看不到开关结果');
+  assert.ok(
+    host.logs.some((line) => line.startsWith('warn') && line.includes('工具仍然可见')),
+    `restrict 失败必须 warn 且写明「工具仍然可见」（实际日志：${host.logs.join(' | ')}）`,
+  );
+  assert.equal(host.promptFor(agent), '', '注入面与工具面解耦：工具没摘掉也要停止注入');
+});
+
+test('记忆开关：agent.ctx 的服务属性访问抛错时不得逃出（真机 Proxy 陷阱，2026-10-08 冒烟抓出）', async () => {
+  // 真机事实：`ctx` 是 cordis 的 Proxy，读一个该 fiber 没 inject 过的服务名会**抛错**而不是
+  // 返回 undefined（`cordis/lib/index.js:676` 的 `cannot get property "..." without inject`）。
+  // 早期写法 `if (scoped?.tools?.restrict === undefined)` 会把异常抛出函数体，真机上表现为
+  // `/memory off` 变成 error 结果（"关不掉"）。这里用**会抛错的 getter** 复刻该形态。
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-throw', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  const realTools = agent.ctx.tools;
+  Object.defineProperty(agent.ctx, 'tools', {
+    configurable: true,
+    get() {
+      throw new Error('cannot get property "tools" without inject');
+    },
+  });
+
+  const result = await host.commands[0].handler({
+    commandId: 'c-off-throw',
+    agent,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.kind, 'success', '服务属性抛错时命令仍须返回成功（否则用户看不到任何反馈）');
+  assert.ok(
+    host.logs.some((line) => line.startsWith('warn') && line.includes('工具仍然可见')),
+    `属性访问抛错必须被捕获并 warn（实际日志：${host.logs.join(' | ')}）`,
+  );
+  assert.equal(host.promptFor(agent), '', '注入面仍须按关闭处理（与工具面解耦）');
+
+  Object.defineProperty(agent.ctx, 'tools', { configurable: true, writable: true, value: realTools });
+});
+
+test('记忆开关：取服务不得改用 ctx.inject 回调（回调是异步的，同步函数里拿不到）', async () => {
+  // 真机事实：`ctx.inject(names, cb)` 返回 Fiber，**回调不在同步栈上执行**（实测要 await 后才跑到）。
+  // 若把 disableMemoryTools 改成走 inject 回调，同步调用点拿到的 tools 恒为 undefined →
+  // 闸门永远施加不上，且不报错（比抛错更隐蔽）。这里断言"施加闸门不依赖 inject 回调"：
+  // 给 agent.ctx 装一个**回调永不执行**的 inject，闸门仍须生效。
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-inject', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  let injectCalled = false;
+  agent.ctx.inject = () => {
+    injectCalled = true;
+    return Promise.resolve(); // 回调永不执行
+  };
+
+  const result = await host.commands[0].handler({
+    commandId: 'c-off-inject',
+    agent,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.kind, 'success');
+  assert.equal(
+    host.liveCount('s-toggle-inject'),
+    1,
+    '闸门必须真的施加（不得依赖 inject 回调，否则静默失效）',
+  );
+  assert.equal(
+    injectCalled,
+    false,
+    '施加闸门不得走 ctx.inject（回调异步，同步函数里拿不到服务）',
+  );
+});
+
+test('记忆开关：/memory on 撤销 restrict（用施加时的 disposer），注入恢复', async () => {
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-back', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  const before = host.promptFor(agent);
+  const invoke = (/** @type {string} */ rawInput) =>
+    host.commands[0].handler({
+      commandId: `c-${rawInput}`,
+      agent,
+      rawInput,
+      attachments: [],
+      signal: new AbortController().signal,
+    });
+
+  await invoke('off');
+  assert.equal(host.liveCount('s-toggle-back'), 1, '关闭后有一条活闸门');
+
+  const back = await invoke('on');
+  assert.equal(back.kind, 'success', String(back.text));
+  assert.equal(host.liveCount('s-toggle-back'), 0, '开启必须调用 disposer 撤销闸门');
+  assert.equal(host.promptFor(agent), before, '开启后注入恢复到关闭前的逐字文本');
+  assert.equal(host.restrictions.length, 1, '撤销不得再叠加新的限制层');
+});
+
+test('记忆开关：未关闭的会话行为与改动前完全一致（回归）', async () => {
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-untouched', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  assert.equal(host.restrictions.length, 0, '没关过的会话不得被 restrict');
+  assert.match(host.promptFor(agent), /project_memory_snapshot/, '没关过的会话照常注入');
+  assert.ok(fs.existsSync(path.join(workspace, 'memory', 'INDEX.md')), '没关过的会话照常写 INDEX.md');
+});
+
+test('记忆开关：agent/disposed 撤销闸门，但**保留**开关状态（review P1-1 口径）', async () => {
+  // 口径：用户要求"关闭后本会话就一直不生效"，而 `agent/disposed` 的触发面比"会话结束"窄得多
+  // （只在 agent 自己的 fiber 被 dispose 时发出）。若在这里清状态，一旦发生"销毁后同 id 重建"
+  // （恢复会话等），状态会静默回到开启、注入恢复，而客户端缓存仍显示"已关"——用户以为关着、
+  // 实际在工作。所以：撤销器要清（避免死记录），状态**不清**。
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const agent = host.makeScopedAgent('s-toggle-disposed', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+  await host.commands[0].handler({
+    commandId: 'c-off',
+    agent,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+  assert.equal(host.liveCount('s-toggle-disposed'), 1);
+
+  await host.fire('agent/disposed', { agent });
+
+  assert.equal(host.liveCount('s-toggle-disposed'), 0, '销毁时必须撤销闸门（不留死记录）');
+
+  // 同 id 重建：必须**仍是关闭态**（这是"本会话一直不生效"的直接体现）
+  const revived = host.makeScopedAgent('s-toggle-disposed', workspace);
+  await host.fire('agent/created', { agent: revived, source: 'startup' });
+  assert.equal(host.promptFor(revived), '', '同 id 重建后仍须零注入（状态不随 agent 销毁丢失）');
+  assert.equal(host.liveCount('s-toggle-disposed'), 1, '重建时必须重新施加闸门');
+});
+
+test('记忆开关：关闭后不得再收到交付提醒（review P0-1）', async () => {
+  // 两个理由各自都足以致命：
+  //   ① 口径要求"不注入任何记忆内容"——提醒是一条真实的 steer 用户消息，含当日记忆文件路径
+  //      与"调用 memory_write / memory_log"的指令；
+  //   ② 提醒点名的两个工具已被闸门摘掉，模型照着调用会撞 `unknown tool`（本仓库踩过同类 P0）。
+  const workspace = makeWorkspace();
+  const host = makeToggleHost();
+  apply(host.ctx, resolveConfig({ completionIdleTurns: 1, reminderCooldownTurns: 1 }).config);
+  const agent = host.makeScopedAgent('s-toggle-remind', workspace);
+  await host.fire('agent/created', { agent, source: 'startup' });
+
+  // 交付轮的三件套（照 test/assembly.test.js 既有提醒用例）：turn/start + tools/result + presented
+  const deliverTurn = async (turn) => {
+    await host.fire('session/event', { id: 's-toggle-remind' }, { type: 'turn/start' });
+    await host.fire('tools/result', { name: 'present', agent, signal: new AbortController().signal }, { isError: false });
+    await host.fire('session/event', { id: 's-toggle-remind' }, {
+      type: 'deliverables/presented',
+      data: { turn, callId: `c${turn}`, files: [{ path: 'x' }] },
+    });
+    await host.fire('agent/turn-stopping', { agent, turn, signal: new AbortController().signal });
+  };
+
+  // 对照组：未关闭的会话必须能收到提醒（证明测试本身有效，不是恒不提醒）
+  await deliverTurn(2);
+  assert.equal(agent.steered.length, 1, '未关闭的会话应正常收到交付提醒（对照组）');
+
+  // 关闭记忆
+  await host.commands[0].handler({
+    commandId: 'c-off',
+    agent,
+    rawInput: 'off',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+
+  // 关闭后：即使再有完整交付信号，也不得 steer 任何提醒
+  await deliverTurn(4);
+  assert.equal(agent.steered.length, 1, '关闭记忆后不得再收到交付提醒（否则既违反零注入、又会导致 unknown tool）');
+
+  // 重新开启后应恢复提醒（证明是"开关"而不是"永久静音"）
+  await host.commands[0].handler({
+    commandId: 'c-on',
+    agent,
+    rawInput: 'on',
+    attachments: [],
+    signal: new AbortController().signal,
+  });
+  await deliverTurn(6);
+  assert.equal(agent.steered.length, 2, '重新开启后必须恢复提醒');
 });
