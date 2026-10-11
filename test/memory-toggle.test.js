@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  TOGGLE_STATUS_OFF_TEXT,
+  TOGGLE_STATUS_ON_TEXT,
   TOGGLE_TOOL_NAMES,
   createToggleState,
   toggleResultText,
@@ -111,4 +113,39 @@ test('用法说明追加开关两行，且保留原有内容', () => {
   assert.ok(merged.startsWith('原始用法'), '不能丢掉既有的 archive/restore 用法');
   assert.ok(merged.includes('/memory on'));
   assert.ok(merged.includes('/memory off'));
+});
+
+test('结果文案必须带客户端可解析的状态标记（跨半边契约，含 noop 路径）', () => {
+  // 这条守卫的是一个**真缺陷**：用户手打 `/memory off` 时，客户端拿不到写命令的返回文本
+  // （`session.command()` 只回 `{matched}`），只能靠 `command/executed` 事件里的 `result.text`
+  // 纠正输入区开关 chip。早先只有 `/memory status` 带标记，于是手打关闭后 chip 一直显示"开启"
+  // ——正是 review P0-2 点名的"把关闭显示成开启"。
+  //
+  // 四条路径（开/关 × 变化/noop）都必须带标记：noop 也要，因为"自愈"场景正是靠它
+  // （本地以为要开、宿主其实已关时，下发的 off 落到 noop 分支，客户端得据此纠正显示）。
+  for (const [on, changed, expected] of [
+    [true, true, TOGGLE_STATUS_ON_TEXT],
+    [true, false, TOGGLE_STATUS_ON_TEXT],
+    [false, true, TOGGLE_STATUS_OFF_TEXT],
+    [false, false, TOGGLE_STATUS_OFF_TEXT],
+  ]) {
+    const text = toggleResultText(on, changed);
+    assert.ok(
+      text.includes(expected),
+      `toggleResultText(${on}, ${changed}) 必须含「${expected}」，否则客户端无法纠正开关 chip`,
+    );
+  }
+
+  // 两个标记互斥：同一份文案里不得同时出现（否则解析方向就不确定了）
+  const onText = toggleResultText(true, true);
+  const offText = toggleResultText(false, true);
+  assert.ok(!onText.includes(TOGGLE_STATUS_OFF_TEXT), '开启文案不得含「已关闭」标记');
+  assert.ok(!offText.includes(TOGGLE_STATUS_ON_TEXT), '关闭文案不得含「已开启」标记');
+
+  // 标记必须自成一行（客户端用 `indexOf` 全文本匹配，行位置不影响；但独立成行可读性最好，
+  // 也避免与"下一步建议"里的用法提示粘连成歧义文本）
+  assert.ok(
+    offText.split('\n').includes(TOGGLE_STATUS_OFF_TEXT),
+    '状态标记必须独占一行（与 /memory status 的排版保持一致）',
+  );
 });

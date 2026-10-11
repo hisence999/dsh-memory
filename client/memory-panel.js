@@ -14,11 +14,12 @@
  *   （依据：`@deepseek-ai/dsh-api-workspace-files` 的 `inspect/confine` 使用 `cwd: workspaceRoot`）。
  * 数据通路（写）：仅通过宿主命令 `/memory archive|restore|on|off`（见 `src/index.js` + `src/tools/archive.js`），
  *   复用 store 的锁/编号/索引，绝不在客户端拼文件写入。
- * 数据通路（读开关状态）：`/memory status` 的**返回文本**。⚠️ 必须走 `ctx.remote.commands.execute`
- *   （`session.command()` 只回 `{matched}`，命令文本在 `dsh-api-session-controller/lib/client.js:1848-1855`
- *   就被丢掉了；官方 ui-commands 也是直接调 remote），所以 inject 面含 `remote.commands`。
- *   组件里对 `remote.commands` 的每次使用都先判存在（见 `readCommandText`）：命名空间缺席时
- *   只降级开关的"回读"（状态落到未知），不会抛进渲染。
+ * 数据通路（读开关状态）：**默认即"开"**（宿主口径"缺席 = 开"）+ 订阅 `command/executed`
+ *   解析返回文本里的状态标记（`状态：记忆已开启/已关闭`）。
+ *   ⚠️ 刻意不走 `/memory status` 回读：每次回读都是一次真实命令执行，会在对话流留下可见节点；
+ *   用户 2026-10-11 定稿"默认即开、只有点击才触发"，所以悬停/聚焦/挂载都不发任何命令。
+ *   （`session.command()` 只回 `{matched}`，命令文本在
+ *   `dsh-api-session-controller/lib/client.js:1848-1855` 就被丢掉了，所以被动同步只能靠事件。）
  *
  * 解析规则**逐条对齐 `src/parse.js`**（真实解析器，优先级高于设计文档样例）：
  *   条目行 TITLE_RE、字段行 matchFieldLine、缩进深度 depthOf、H2 类型映射 LABEL_KIND、
@@ -1079,8 +1080,8 @@
     '.dshmem-gdetail .dshmem-ghd .dshmem-who { font-size: 12px; color: var(--dshmem-faint); }',
 
     /* ── 输入区「记忆开关」chip（conversation.input.left） ──
-       形态取自已评审原型 docs/prototype/memory-toggle.html 的三态：
-         开 = 实底 + 高对比；关 = 描边 + 降级色 + 图标叠 45° 斜杠 + 文字变「记忆已关」。
+       形态取自已评审原型 docs/prototype/memory-toggle.html 的两态：
+         开（默认）= 实底 + 高对比；关 = 描边 + 降级色 + 图标叠 45° 斜杠 + 文字变「记忆已关」。
        两处刻意的实现选择：
          1. 令牌复用：这段不在 `.dshmem-root` 里（宿主 composer 是它的兄弟，不是子孙），
             所以把用到的 `--dshmem-*` 在 `.dshmem-tg-wrap` 上**按同值重新声明**——
@@ -1123,9 +1124,6 @@
     '.dshmem-tg[aria-pressed=true] { background: var(--dshmem-sel); border-color: var(--dshmem-line-strong); color: inherit; }',
     /* 关：描边 + 降级色，一眼看出「没生效」 */
     '.dshmem-tg[aria-pressed=false] { background: transparent; border-color: var(--dshmem-line); color: var(--dshmem-faint); }',
-    /* 未知（review P0-2）：既不能画成"开"（骗用户说记忆在工作），也不能画成"关"（吓用户）。
-       中性：描边 + dim 色、无斜杠、文案仍为「记忆」。 */
-    '.dshmem-tg[data-unknown=true] { background: transparent; border-color: var(--dshmem-line); color: var(--dshmem-dim); }',
     '.dshmem-tg-ic { position: relative; display: inline-flex; width: 13px; height: 13px; flex: 0 0 auto; }',
     '.dshmem-tg-ic svg { width: 100%; height: 100%; }',
     '.dshmem-tg-bar { position: absolute; left: -2px; right: -2px; top: 50%; height: 1.4px; margin-top: -0.7px; background: currentColor; border-radius: 1px; transform: rotate(-45deg); }',
@@ -2679,13 +2677,16 @@
   ];
 
   /**
-   * 从 `/memory status` 的返回文本判定开关状态。
+   * 从命令返回文本判定开关状态。
    *
-   * 契约（与宿主侧队友冻结）：状态行固定是 `状态：记忆已开启` / `状态：记忆已关闭`。
+   * 契约（与宿主侧冻结）：状态行固定是 `状态：记忆已开启` / `状态：记忆已关闭`，
+   * 由 `src/memory-toggle.js` 定义（`/memory status` 与 `/memory on|off` 的文案都带它）。
    * 两个标记前缀不同（`已开启` vs `已关闭`）、互不包含，所以**判定顺序不影响结果**；
    * 先判"已关闭"只是让"两个都不匹配 → null"这条路径读起来更直观。
    * （review P2-1：早先的注释举了"`状态：记忆未开启` 会被误判成开"的反例，那是错的——
    *  `'状态：记忆未开启'.indexOf('状态：记忆已开启')` 恒为 -1，"未"≠"已"。）
+   *
+   * 现在的用途只有一处：解析 `command/executed` 事件里用户**手打**命令的返回文本。
    *
    * @param {unknown} text
    * @returns {boolean|null} true=开、false=关、null=认不出（旧宿主 / 文案变了）
@@ -2700,12 +2701,14 @@
   /**
    * 开关 chip 的悬停说明（原型文案）。
    *
-   * 三态各有各的文案。**未知态必须与"确知开启"区分开**（review P0-2 的同一类错误）：
-   * 早期版本把 `on === null` 落进了下面那个"已开启"分支，于是芯片主体（文案/aria/data-unknown）
-   * 全都诚实地表示"不知道"，鼠标一悬停却冒出「记忆已开启」——等于换个地方继续骗用户。
-   * 另外点击语义已改成"先探真值再取反"，所以未知态不能承诺"点击关闭"。
+   * 两态：开 / 关。开态的文案说明"当前是开的 + 点击关闭"；关态说明"当前是关的 + 点击开启"，
+   * 并都说清关闭的后果（不注入记忆快照、五个 memory_* 工具不可见）。
    *
-   * @param {boolean|null} on
+   * 早先版本还有第三态"未知"，文案里要刻意避免宣称任何一种状态（review P0-2）。
+   * 用户 2026-10-11 定稿"默认就是开启"之后，未知态已从组件里整层移除（理由见组件头注释），
+   * 这里也就不再需要那条分支。
+   *
+   * @param {boolean} on
    * @returns {{main: string, sub: string}}
    */
   function toggleTooltip(on) {
@@ -2715,12 +2718,6 @@
         sub: '关闭期间：不注入记忆快照，五个 memory_* 工具不可见',
       };
     }
-    if (on === null) {
-      return {
-        main: '记忆开关状态未知 · 点击切换本会话的记忆',
-        sub: '点击时会先查询当前状态再切换；关闭后：不注入记忆快照，五个 memory_* 工具不可见',
-      };
-    }
     return {
       main: '记忆已开启 · 点击关闭本会话的记忆',
       sub: '关闭后：不注入记忆快照，五个 memory_* 工具不可见',
@@ -2728,72 +2725,62 @@
   }
 
   /**
-   * 造「记忆开关」chip 组件（闭包持有 sessions 与 remote）。
+   * 造「记忆开关」chip 组件（闭包持有 sessions）。
    *
-   * 状态来源与写路径（**这是本组件最容易踩的三个坑，注释写清依据**）：
-   *   1. 读：`session.command()` 的返回值只有 `{ matched }`，命令文本在
-   *      `dsh-api-session-controller/lib/client.js:1848-1855` 就被丢掉了。
-   *      要拿到 `/memory status` 的**文本**，只能直接调 `ctx.remote.commands.execute(...)`
-   *      （官方 ui-commands 的 `execute()` 也是这么做的：`dsh-client-ui-commands/lib/client.js:1069`）。
-   *      返回 `{ ok: true, value: { result: { kind, text } } }`，见 `dsh-commands` 的
-   *      `commands/execute` 结果 schema。失败/不可用时**只降级回读**，UI 落到"未知"。
-   *   2. 写：仍走现有面板按钮那条通路 `sessions.using(sessionId, { source: 'memoryPanel' }, …)`
+   * 交互口径（用户 2026-10-11 定稿）：**只有点击才动开关**。
+   *   悬停 / 键盘聚焦**不发任何命令**——早先版本在这两个事件上挂 `probe()`，
+   *   于是"鼠标划过就执行一次 `/memory status`"：宿主会写 `command/run` + `command/done`
+   *   两条会话事件，ui-chat 把它们渲染成**对话流里的可见节点**（只隐藏 `permission`）。
+   *   虽然不进模型上下文（`command/*` 不在 `SURFACE_EVENT_TYPES` 白名单里），
+   *   但"划过就冒一条节点"仍是意外副作用，已整层移除。
+   *
+   * 状态来源（**这是本组件最容易踩的三个坑，注释写清依据**）：
+   *   1. **默认即"开"**：宿主口径是"缺席 = 开"（`src/memory-toggle.js` 的 `createToggleState`），
+   *      所以本份文档里还没拿到任何证据的会话，按"开"渲染——用户看到的就是宿主真实默认值。
+   *      刻意**不**在挂载时回读 `/memory status`：每次回读都是一条真实命令 + 一个对话流节点，
+   *      而本槽位在**新建对话首屏**就渲染，用户还没说话就先冒一条命令纯属噪声（review P1-2）。
+   *   2. **写**：走现有面板按钮那条通路 `sessions.using(sessionId, { source: 'memoryPanel' }, …)`
    *      + `reference.binding.session.command('/memory off')`（本文件 runCommand 同款）。
-   *      写命令的返回值同样只有 `matched`，所以**切换后本地状态跟随的是"我们刚发出去的目标态"**。
-   *   3. **回读次数必须省着用**：每次 `/memory status` 都是一次真实命令执行，宿主会写
-   *      `command/run` + `command/done` 两条会话事件，而 ui-chat 会把它们渲染成**可见的对话流节点**
-   *      （只有 `name === 'permission'` 的命令被隐藏）。所以：
-   *        - 挂载回读按 sessionId 记忆化（`statusCache` 记结果、`statusPending` 存回读中的
-   *          Promise），每个会话每份文档只发一次命令；
-   *        - 切换成功后**不再补一次 status**（`matched: true` 已表示受理，再探纯属给用户刷两行噪声）。
+   *      写命令的返回值只有 `matched`，所以切换后本地状态跟随的是"我们刚发出去的目标态"。
+   *   3. **被动纠正（仅"手打/别的入口"这条通路）**：用户手打 `/memory off|on` 时，
+   *      订阅 `command/executed` 拿到 `result.text` 并解析状态标记。
+   *      这条通路要求宿主结果文案带标记——`toggleResultText` 因此也写入了
+   *      `状态：记忆已开启/已关闭`（跨半边契约，见 `src/memory-toggle.js`）。
+   *
+   *      ⚠️ 注意订阅的**触发面**：`command/executed` 只在 `CommandUiRuntime.execute()`
+   *      （ui-commands，即输入框提交/命令菜单那条路）里发布一次
+   *      （`dsh-client-ui-commands/lib/client.js:1075` 的 `notifyExecuted`）。
+   *      而**本 chip 自己的点击**走的是 `sessions.using → session.command()`
+   *      → `Session.command()`，它直接调 `remote.commands.execute`
+   *      （`dsh-api-session-controller/lib/client.js:1848-1854`），**不经过** ui-commands，
+   *      所以**点击不会触发这个订阅**。点击后的状态跟随由 `commit` 的本地赋值完成。
+   *      两条通路各管一边，别把 `commit` 的本地跟随当成冗余删掉。
+   *
+   * 已知残余窗口：若会话在本份文档之外被关过（例如关闭后刷新页面，客户端缓存丢失），
+   * 芯片会先显示"开"。此时点击是**自愈**的：下发 `/memory off` 在宿主侧是幂等 noop，
+   * 命令**仍然被受理**（`matched: true`），于是 `commit` 照常把本地状态落到"关"，
+   * 与宿主真值一致。
+   * （刻意不改成"点击前先探一次"：那会按探测结果取反，把用户的"关"意图反转成"开"。）
    *
    * @param {object} sessions ctx.sessions
-   * @param {object} remote ctx.remote
    * @param {Function} React
    * @returns {Function} 组件
    */
-  function makeMemoryToggle(sessions, remote, React, subscribeCommandExecuted) {
+  function makeMemoryToggle(sessions, React, subscribeCommandExecuted) {
     var h = React.createElement;
 
     /**
-     * 每个会话已探到的开关状态：`true` / `false` / `null`（探过但认不出）。
-     * 键不存在 = 还没探过。**必须把结果也缓存下来**：只记"探过"会让重挂载落回
-     * `null`（= 未知 = 按"开"渲染），于是宿主明明是关的、UI 却显示"记忆"——那就是在骗用户。
+     * 每个会话**已确知**的开关状态：`true` / `false`。键不存在 = 本份文档里还没收到过证据，
+     * 按"默认开"渲染。
      *
-     * 两张表都用 `Object.create(null)`：键来自宿主的 sessionId（外部字符串），
+     * 用 `Object.create(null)`：键来自宿主的 sessionId（外部字符串），
      * 无原型表可以彻底避开 `__proto__` / `constructor` 这类键名的意外行为。
      */
     var statusCache = Object.create(null);
 
-    /**
-     * 每个会话的「回读中」Promise（`statusCache` 的补位）。
-     *
-     * 为什么存 Promise 而不是存"探过了"的布尔：组件可能在回读**途中**被卸载再挂载
-     * （输入区随会话切换重挂载）。若只记"探过"，新实例会因守卫直接返回、永远等不到结果，
-     * 于是停在"未知"（按"开"渲染）——宿主明明是关的却显示成开。
-     * 共享同一个 Promise 则新实例挂上去就能拿到结果，而且**依然只发一次命令**。
-     */
-    var statusPending = Object.create(null);
-
-    /** 缓存查询：未探过时返回 undefined，探过但未知返回 null。 */
+    /** 缓存查询：未收到过证据时返回 undefined。 */
     var cachedStatus = function (sessionId) {
       return Object.prototype.hasOwnProperty.call(statusCache, sessionId) ? statusCache[sessionId] : undefined;
-    };
-
-    /** 发一行命令并拿到它的返回文本；不可用/失败时返回 null（绝不抛给渲染）。 */
-    var readCommandText = async function (sessionId, line) {
-      var commands = remote && remote.commands;
-      if (commands === undefined || commands === null || typeof commands.execute !== 'function') return null;
-      try {
-        var result = await commands.execute(sessionId, line, []);
-        if (!result || result.ok !== true) return null;
-        var payload = result.value;
-        if (payload === undefined || payload === null || payload.result === undefined || payload.result === null) return null;
-        var text = payload.result.text;
-        return typeof text === 'string' ? text : null;
-      } catch (error) {
-        return null;
-      }
     };
 
     /** 通过会话执行一行命令（与面板按钮同一条通路，含"会话未打开"检查）。 */
@@ -2813,16 +2800,16 @@
    */
   return function MemoryToggle(props) {
     var sessionId = props.sessionId;
-    // 初值直接取缓存：重挂载时立刻显示上次探到的真实状态，不留"未知"那一帧
+    // 初值：缓存里没有证据时按"默认开"渲染（宿主口径"缺席 = 开"，见 src/memory-toggle.js）。
     var initial = cachedStatus(sessionId);
-    var onState = React.useState(initial === undefined ? null : initial);
+    var onState = React.useState(initial === undefined ? true : initial);
     var on = onState[0];
     var setOn = onState[1];
     var busyState = React.useState(false);
     var busy = busyState[0];
     var setBusy = busyState[1];
 
-    // 当前会话 id 的"活引用"：probe 的异步回调靠它判断结果是否还属于当前会话。
+    // 当前会话 id 的"活引用"：异步回调靠它判断结果是否还属于当前会话。
     var liveRef = React.useRef(sessionId);
     liveRef.current = sessionId;
 
@@ -2832,54 +2819,26 @@
     // 同一个实例继续存活，只是 `props.sessionId` 变了。`useState` 的初值只算一次，
     // 不在这里跟随的话，芯片会继续显示**上一个会话**的开关状态（真实状态相反 = 骗用户）。
     // 这是 React 官方的"props 变化时调整 state"写法：渲染期 setState 会让 React 立刻重渲染，
-    // 用新会话的缓存值（没探过就是 null = 未知）覆盖。
+    // 用新会话的缓存值（没证据就是"默认开"）覆盖。
     var shownRef = React.useRef(sessionId);
     if (shownRef.current !== sessionId) {
       shownRef.current = sessionId;
       var next = cachedStatus(sessionId);
-      setOn(next === undefined ? null : next);
+      setOn(next === undefined ? true : next);
     }
 
-    // ⚠️ 刻意**不**在挂载时主动回读（review P1-2）：
-    // 每次 `/memory status` 都是一次真实命令执行，宿主会写 `command/run` + `command/done`，
+    // ⚠️ 刻意**不**在挂载时主动回读 `/memory status`（review P1-2 + 用户 2026-10-11 定稿）：
+    // 每次回读都是一次真实命令执行，宿主会写 `command/run` + `command/done`，
     // 而 ui-chat 会把除 `permission` 以外的任何命令都渲染成**可见的对话流节点**
     // （`dsh-client-ui-chat/lib/client.js:7719` 的 isVisibleChatNode）。而本槽位在**新建对话首屏**
     // 就渲染——那正是本功能的主场景，用户还没说话就先看到一条 `/memory status`，纯属噪声。
     //
-    // 改为两条更省的通路：
-    //   ① 首次交互（hover 或点击）才懒探一次，结果入缓存；
-    //   ② 订阅 `command/executed`，用户在输入框手打 `/memory off|on` 时立刻纠正芯片状态
+    // 状态靠两条**零额外命令**的通路保持诚实：
+    //   ① 默认值直接取宿主口径"缺席 = 开"，所以首屏显示的"开"就是真值，不是猜测；
+    //   ② 订阅 `command/executed`，用户手打 `/memory off|on` 时立刻纠正芯片
     //      （否则芯片会一直显示旧状态——review P0-2 点名的"把关闭显示成开启"）。
-    var probe = function () {
-      if (cachedStatus(sessionId) !== undefined) return Promise.resolve(cachedStatus(sessionId));
-      var pending = statusPending[sessionId];
-      if (pending === undefined) {
-        pending = readCommandText(sessionId, '/memory status').then(function (text) {
-          var parsed = parseToggleStatus(text);
-          // 只缓存**非 null**（review P0-2）：认不出就当作"没探过"，下次交互再试一次。
-          // 把 null 永久写进缓存会让一次瞬时失败（连接未就绪等）永久锁死成未知态。
-          if (parsed !== null) {
-            statusCache[sessionId] = parsed;
-          } else {
-            // 认不出时连"进行中"的痕迹一起清掉。**这一步不能省**：`statusPending` 里那个
-            // Promise 已经 resolve 成 null 了，若留着它，下一次 probe 只会往同一个已结算的
-            // Promise 上再挂一次 then，永远拿不到新结果 —— "下次交互再试一次"就只是句空话，
-            // 一次瞬时失败会把芯片永久锁在未知态（正是上面那段注释想避免的事）。
-            delete statusPending[sessionId];
-          }
-          return parsed;
-        });
-        statusPending[sessionId] = pending;
-      }
-      pending.then(function (parsed) {
-        if (parsed === null) return;
-        // 探的是哪个会话，就只写哪个会话的显示：切会话途中返回的**旧结果**不得覆盖新会话。
-        // liveRef 每次渲染都被刷新成当前的 sessionId，所以这就是"这次结果还属于当前会话吗"。
-        if (liveRef.current !== sessionId) return;
-        setOn(parsed);
-      });
-      return pending;
-    };
+    // 代价是一个已知残余窗口：会话在**本份文档之外**被关过（如关闭后刷新页面）时，
+    // 芯片先显示"开"；点击会自愈（`matched: true` → `commit` 落到"关"，见组件头注释）。
 
     // 订阅命令执行事件：别人（用户手打 / 面板）改了开关，芯片要跟着变。
     React.useEffect(
@@ -2887,7 +2846,7 @@
         if (typeof subscribeCommandExecuted !== 'function') return undefined;
         return subscribeCommandExecuted(function (changedSessionId, commandName, result) {
           if (changedSessionId !== sessionId || commandName !== MEMORY_COMMAND_NAME) return;
-          // 只有明确成功才更新；status 的返回文本同样带标记，可一并解析
+          // 只有明确成功才更新；`status` 与 `on|off` 的返回文本都带状态标记，可一并解析
           if (!result || result.kind !== 'success' || typeof result.text !== 'string') return;
           var parsed = parseToggleStatus(result.text);
           if (parsed === null) return;
@@ -2906,7 +2865,7 @@
           setBusy(false);
           if (!result || result.ok !== true) return; // 失败：保持原状态，不假装切成功
           if (result.value && result.value.matched === false) return; // 旧宿主不认识 /memory
-          statusCache[sessionId] = target; // 缓存跟随，重挂载时不会退回"未知"
+          statusCache[sessionId] = target; // 缓存跟随，重挂载时不会退回默认值
           if (liveRef.current === sessionId) setOn(target);
           // 刻意**不**在切换后再发一次 status 校正：`matched: true` 已表示命令被受理，
           // 而每一次命令都会在对话流里留下一个可见的 command 节点
@@ -2920,38 +2879,24 @@
 
     var toggle = function () {
       if (busy === true) return;
-      // 已确知状态：直接取反下发。
-      if (on !== null) {
-        commit(on === false);
-        return;
-      }
-      // 未知态（刷新页面后、或本会话从未交互过）：**一次点击也要完成切换**。
-      // 早期实现是"先探一次、让用户再点一次"，但真机上未知态很常见（缓存只活在内存里），
-      // 那会变成"点一下没反应"，用户会以为按钮坏了。
-      // 现在的语义：先探真值 → 按真值取反 → 下发；探不到（旧宿主/瞬时失败）就按"关"下发
-      // （用户主动点开关，意图多半是关掉；而重复 off 是幂等的 noop，不会造成伤害）。
-      setBusy(true);
-      probe().then(function (known) {
-        // ⚠️ busy 必须先解除，再判断结果是否还属于当前会话。
-        // `busy` 是**组件级** state，而组件不会因换会话重挂载（宿主 renderEntry 不给 key，
-        // 与上面 shownRef 那段是同一个事实）。若像早期那样在 liveRef 守卫里直接 return，
-        // busy 会永远停在 true —— 芯片在**所有**会话上永久 disabled，用户看到的就是"按钮坏了"，
-        // 正是本段注释要避免的那个失败。
-        setBusy(false);
-        // 旧会话的迟到结果不得下发：那会把开关命令打到用户已经离开的会话上。
-        if (liveRef.current !== sessionId) return;
-        var target = known === null || known === undefined ? false : known === false;
-        commit(target);
-      });
+      // 按当前显示状态取反下发。
+      // 这里**不做"先探真值再取反"**：那会在点击时额外执行一次 `/memory status`（多一个可见节点），
+      // 而且当本地显示与宿主不一致时，探测结果会把用户的意图反转（想关却开了）。
+      // 残余窗口的自愈由 `commit` 完成：`/memory off` 在宿主侧是幂等 noop，但命令**仍被受理**
+      // （`matched: true`），于是 `commit` 照常把本地状态落到"关"，与宿主真值一致。
+      // ⚠️ 不要指望 `command/executed` 订阅来兜这一次：本点击走 `session.command()`，
+      // 不经过 ui-commands，因而**不发布**那个事件（见组件头注释）。
+      commit(on === false);
     };
 
       var tip = toggleTooltip(on);
-      // 三态渲染（review P0-2）：开 / 关 / **未知**。
-      // 早期版本把未知收敛进"开"，理由是宿主侧"缺席即开"——但那是在**骗用户**：
-      // 用户手打 `/memory off` 之后（旧实现不订阅事件）芯片会一直显示"记忆"（按下态），
-      // 与真实状态相反。现在未知态用中性外观 + `aria-pressed` 缺省，不宣称任何一种状态。
+      // 两态渲染：开 / 关。
+      // 早先版本有第三态「未知」（回读没回来时用中性外观 + aria-pressed 缺省）。
+      // 用户 2026-10-11 定稿"默认就是开启状态"之后，未知态已不存在：
+      //   宿主口径是"缺席 = 开"，本份文档里没证据的会话按"开"渲染就是**真值**，不是猜测；
+      //   而"显示与宿主不一致"的两个窗口分别由 `commit`（点击）与订阅（手打）覆盖。
+      //   留一个中性态反而会让默认首屏看起来"没在工作"。
       var isOff = on === false;
-      var isUnknown = on === null;
       var iconChildren = [
         h(
           'svg',
@@ -2967,21 +2912,20 @@
           }),
         ),
       ];
-      // 关：图标上叠一条 45° 斜杠（原型 `.bar`）。未知态**不画**斜杠。
+      // 关：图标上叠一条 45° 斜杠（原型 `.bar`）。
       if (isOff) iconChildren.push(h('span', { key: 'bar', className: 'dshmem-tg-bar' }));
 
+      // ⚠️ 刻意**不**挂 onMouseEnter / onFocus：用户定稿"只有点击才能触发按钮开关"。
+      // 早先版本在这两个事件上挂 `probe()`，于是鼠标划过就执行一次 `/memory status`
+      // ——那是真实命令执行，会在对话流里留下可见节点（见组件头注释）。
       var buttonProps = {
         type: 'button',
         className: 'dshmem-tg',
         'aria-label': isOff ? '记忆已关' : '记忆',
+        'aria-pressed': !isOff,
         disabled: busy,
         onClick: toggle,
-        onMouseEnter: probe,
-        onFocus: probe,
       };
-      // 只在确知状态时给 aria-pressed；未知态不给，避免向辅助技术宣称"已开启"。
-      if (!isUnknown) buttonProps['aria-pressed'] = !isOff;
-      if (isUnknown) buttonProps['data-unknown'] = 'true';
 
       return h(
         'span',
@@ -3061,7 +3005,7 @@
               return ctx.on('command/executed', listener);
             }
           : undefined;
-      var toggle = makeMemoryToggle(ctx.sessions, ctx.remote, React, subscribeCommandExecuted);
+      var toggle = makeMemoryToggle(ctx.sessions, React, subscribeCommandExecuted);
       ctx.effect(
         function () {
           // 样式注入与两个槽位注册合并在**同一个** effect 里：随插件卸载一起撤销，
@@ -3121,10 +3065,10 @@
 
     return {
       name: 'dsh-memory-panel',
-      // `remote.commands`：/memory status 的**返回文本**只有走 remote 才拿得到
-      // （session.command() 只回 {matched}，见本文件顶部注释）。commands 命名空间由
-      // 宿主 @deepseek-ai/dsh-api-remotes 提供（本包 dsh.client.inject 已依赖它）。
-      inject: ['slots', 'remote', 'remote.workspaceFiles', 'remote.commands', 'sessions'],
+      // `remote.commands` 已**不再需要**：开关 chip 过去靠它执行 `/memory status` 回读状态，
+      // 但用户 2026-10-11 定稿"默认即开 + 只有点击才触发"之后，回读整层移除
+      // （状态改由"宿主默认值 + `command/executed` 订阅"确定，零额外命令）。
+      inject: ['slots', 'remote', 'remote.workspaceFiles', 'sessions'],
       apply: apply,
     };
   };

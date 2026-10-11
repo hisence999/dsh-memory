@@ -23,6 +23,21 @@ export const TOGGLE_TOOL_NAMES = Object.freeze([
 export const TOGGLE_ON_VERB = 'on';
 export const TOGGLE_OFF_VERB = 'off';
 
+/**
+ * 状态标记：**机器可判定**，客户端（`client/memory-panel.js` 的 `parseToggleStatus`）
+ * 按这两个字符串同步输入区开关 chip 的位置。
+ *
+ * 跨半边契约：`/memory status` 与 `/memory on|off` 的返回文本里**都必须含其中之一**
+ * ——改一个字就等于改协议。
+ *
+ * 为什么开关结果（`toggleResultText`）也要带这个标记：用户可能在输入框**手打**
+ * `/memory off`，而客户端拿不到写命令的返回文本（`session.command()` 只回 `{matched}`），
+ * 只能靠 `command/executed` 事件里的 `result.text` 纠正 chip。早先只有 `status` 带标记，
+ * 于是手打关闭后 chip 会一直显示"开启"——正是 review P0-2 点名的"把关闭显示成开启"。
+ */
+export const TOGGLE_STATUS_ON_TEXT = '状态：记忆已开启';
+export const TOGGLE_STATUS_OFF_TEXT = '状态：记忆已关闭';
+
 /** 开关动词到布尔值的映射；不是开关动词时返回 `undefined`。 */
 export function toggleVerbOf(rawVerb) {
   if (typeof rawVerb !== 'string') return undefined;
@@ -96,6 +111,7 @@ export function toggleResultText(on, changed) {
   if (on) {
     return [
       '[memory 完成]',
+      TOGGLE_STATUS_ON_TEXT,
       '做了什么：已为本会话开启记忆功能。',
       '结果：会话边界注入记忆快照；五个 memory_* 工具重新可见。',
       changed ? '下一步建议：无需其他操作，下一条消息起即按开启状态工作。' : '下一步建议：本会话原本就是开启状态，未做改动。',
@@ -103,6 +119,7 @@ export function toggleResultText(on, changed) {
   }
   return [
     '[memory 完成]',
+    TOGGLE_STATUS_OFF_TEXT,
     changed ? '做了什么：已为本会话关闭记忆功能。' : '做了什么：本会话原本就是关闭状态，未做改动。',
     '结果：不再注入任何记忆内容；memory_search / memory_write / memory_edit / memory_archive / memory_log 五个工具从本会话消失。',
     '说明：**只是本会话不启用，记忆文件一个字都没动**，也没有删除任何条目；其他工具（读写文件、bash 等）完全不受影响。',

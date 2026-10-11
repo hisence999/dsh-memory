@@ -92,7 +92,7 @@
     flex: 0 0 auto; cursor: pointer;
   }
 
-  /* ── 开关三态 ── */
+  /* ── 开关两态 ── */
   /* 开（默认）：与 permission/plan chip 同形同色 */
   .chip.mem-on { color: var(--text); border-color: var(--line-strong); background: var(--bg-sel); }
   .chip.mem-on .ic { color: var(--text); }
@@ -161,6 +161,8 @@
 <div class="page">
   <h1>记忆开关 · 输入区落点</h1>
   <div class="sub">宿主槽位：<code>conversation.input.left</code>（list / session 作用域）—— 加式槽，不抢任何随附控件的位置。</div>
+  <div class="note">交互口径（用户 2026-10-11 定稿）：<b>默认就是开启状态，只有点击动作才能触发开关</b>。
+    悬停 / 键盘聚焦只显示说明，<b>不发任何命令</b>——所以这里只有「开」「关」两态，没有"未知"态。</div>
 
   <h2>1. 它到底在输入区的哪个位置<span class="n">新建对话（hero）态</span></h2>
   <div class="stage hero">
@@ -197,7 +199,7 @@
     </div>
   </div>
 
-  <h2>2. 三种状态<span class="n">点击试试，会真的切换</span></h2>
+  <h2>2. 两种状态<span class="n">点击试试，会真的切换</span></h2>
   <div class="stage">
     <div class="composer">
       <div class="draft">这个 bug 帮我看看…</div>

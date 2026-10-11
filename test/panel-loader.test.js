@@ -8,11 +8,13 @@
  *        - 「记忆」视图进 `conversation.view`，id='memory'、order=20；
  *        - 「记忆开关」chip 进 `conversation.input.left`，id='memory-toggle'、order=30
  *          （空白会话也渲染，是新建对话页唯一的记忆入口）；
- *      且注入面覆盖 slots / remote / remote.workspaceFiles / remote.commands / sessions。
+ *      且注入面覆盖 slots / remote / remote.workspaceFiles / sessions。
  *
- * 为什么 inject 里有 `remote.commands`：`session.command()` 只回 `{matched}`，命令文本被丢掉
- * （`dsh-api-session-controller/lib/client.js:1848-1855`），而开关 chip 需要 `/memory status`
- * 的**返回文本**来初始化状态，只能直连 `remote.commands.execute`（官方 ui-commands 同款）。
+ * 开关口径（用户 2026-10-11 定稿）：**默认即"开" + 只有点击才触发**。
+ *   - 悬停 / 聚焦 / 挂载都**不发任何命令**（早先版本在 hover 上探 `/memory status`，
+ *     会在对话流留下可见节点）；
+ *   - 状态靠"宿主默认值（缺席 = 开）+ `command/executed` 订阅"确定，零额外命令；
+ *   - 因此 inject 面**不再需要** `remote.commands`（回读通路已整层移除）。
  *
  * 纯函数区的行为由 `test/panel-model.test.js` 覆盖（并与 `src/parse.js` 交叉验证），此处不重复。
  *
@@ -271,8 +273,8 @@ test('factory 返回的插件对象形状正确', () => {
   // vm 沙箱里的数组属于另一个 realm，直接 deepEqual 会因原型不同而失败，故先拷回本 realm
   assert.deepEqual(
     Array.from(plugin.inject),
-    ['slots', 'remote', 'remote.workspaceFiles', 'remote.commands', 'sessions'],
-    '注入面必须与实现一致：槽位注册 + 工作区文件远端 + 命令远端（/memory status 的返回文本）+ 会话命令',
+    ['slots', 'remote', 'remote.workspaceFiles', 'sessions'],
+    '注入面必须与实现一致：槽位注册 + 工作区文件远端 + 会话命令（开关已不再回读 status，故不需要 remote.commands）',
   );
 });
 
@@ -376,7 +378,13 @@ test('apply 的 effect 返回卸载函数，两个槽位都被撤销', () => {
   assert.deepEqual(styleRemoved, [], '无 document 时不应尝试注入样式');
 });
 
-/** 造一个可记录的 ctx：commands.execute 与 session.command 都记进 `executed`。 */
+/**
+ * 造一个可记录的 ctx：`session.command` 记进 `executed`。
+ *
+ * 开关口径（用户 2026-10-11 定稿）：**默认即开 + 只有点击才触发**，所以这里
+ * **不再提供** `remote.commands` 的回读桩——那正是被移除的通路。若实现里还残留
+ * `/memory status` 回读，用例会因为"命令条数不为 0"直接变红（这是刻意的守卫）。
+ */
 function makeToggleCtx(options = {}) {
   /** @type {Array<{via: string, sessionId: string, line: string}>} */
   const executed = [];
@@ -386,34 +394,19 @@ function makeToggleCtx(options = {}) {
   const calls = [];
   /** @type {Array<(sessionId: string, commandName: string, result: any) => void>} */
   const commandExecutedListeners = [];
+  /** 每次订阅被撤销时 +1（测 useEffect 清理：订阅泄漏 = 这个数不涨） */
+  let unsubscribeCount = 0;
   /** @type {string} 宿主侧开关状态（模拟宿主开关表） */
   let hostOn = options.hostOn === undefined ? true : options.hostOn;
-  /** 状态回读的返回文本（可被测试改） */
-  let statusText = options.statusText === undefined ? null : options.statusText;
   /** 写命令是否被宿主识别（旧宿主 = false） */
   const matched = options.matched === undefined ? true : options.matched;
-  /** 是否提供 remote.commands.execute（旧宿主可能没有 commands 命名空间） */
-  const hasCommands = options.hasCommands !== false;
-  /** 手动闸门：非 null 时 status 会等它 resolve */
+  /** 手动闸门：非 null 时写命令会等它 resolve（测 busy 时序） */
   const gate = options.gate === undefined ? null : options.gate;
-
-  /** 当前应返回的状态文本（默认按 hostOn 推导，与宿主契约一致）。 */
-  const currentStatusText = () =>
-    statusText !== null ? statusText : '状态：记忆' + (hostOn ? '已开启' : '已关闭');
+  /** true 时写命令直接 reject（测失败路径必须清 busy） */
+  const failWrite = options.failWrite === true;
 
   const ctx = {
-    remote: {
-      workspaceFiles: {},
-      commands: hasCommands
-        ? {
-            async execute(sessionId, line) {
-              executed.push({ via: 'remote', sessionId, line });
-              if (gate !== null) await gate;
-              return { ok: true, value: { result: { kind: 'success', text: currentStatusText() } } };
-            },
-          }
-        : {},
-    },
+    remote: { workspaceFiles: {} },
     sessions: {
       async using(target, opts, operation) {
         uses.push({ target, options: opts });
@@ -423,6 +416,8 @@ function makeToggleCtx(options = {}) {
               getSnapshot: () => ({ openState: options.closed ? 'error' : 'open', openError: options.closed ? { message: 'boom' } : null }),
               async command(line) {
                 executed.push({ via: 'session', sessionId: target, line });
+                if (gate !== null) await gate;
+                if (failWrite) throw new Error('write failed');
                 if (line === '/memory off') hostOn = false;
                 if (line === '/memory on') hostOn = true;
                 return { ok: true, value: { matched: matched } };
@@ -447,7 +442,13 @@ function makeToggleCtx(options = {}) {
     /** 事件订阅：本插件用 ctx.on('command/executed', listener) */
     on(event, listener) {
       if (event === 'command/executed') commandExecutedListeners.push(listener);
-      return () => {};
+      return () => {
+        unsubscribeCount += 1;
+        // 同时把 listener 从"活跃表"里摘掉：换会话时必须重新订阅，
+        // 否则旧会话的 listener 会继续挂在事件上（订阅泄漏）。
+        const index = commandExecutedListeners.indexOf(listener);
+        if (index !== -1) commandExecutedListeners.splice(index, 1);
+      };
     },
   };
 
@@ -457,12 +458,10 @@ function makeToggleCtx(options = {}) {
     executed,
     uses,
     commandExecutedListeners,
+    unsubscribeCount: () => unsubscribeCount,
     lines: () => executed.map((entry) => entry.line),
     statusCount: () => executed.filter((entry) => entry.line === '/memory status').length,
     hostOn: () => hostOn,
-    setStatusText: (value) => {
-      statusText = value;
-    },
     /** 取开关组件 */
     component() {
       return calls.find((entry) => entry.options.id === 'memory-toggle').component;
@@ -470,12 +469,7 @@ function makeToggleCtx(options = {}) {
   };
 }
 
-/** 触发一次 hover（懒探入口）。 */
-function hover(chip) {
-  chip.props.onMouseEnter();
-}
-
-test('记忆开关：点击真的发 /memory off 与 /memory on，且本地状态跟随', async () => {
+test('记忆开关：默认即「开启」——挂载与多轮重渲染都不发任何命令', async () => {
   const { registration } = load();
   const env = liveReact();
   const plugin = registration.factory(() => env.React);
@@ -485,37 +479,70 @@ test('记忆开关：点击真的发 /memory off 与 /memory on，且本地状�
   const component = harness.component();
   assert.ok(component !== undefined, '必须注册 memory-toggle');
 
-  // ── 挂载：**不发任何命令**（review P1-2：懒探，新建对话首屏不该出现命令节点） ──
+  // 用户 2026-10-11 定稿：「默认就是开启状态」。
+  // 宿主口径是"缺席 = 开"（src/memory-toggle.js 的 createToggleState），所以首屏按"开"渲染
+  // 显示的就是**真值**，不需要先探一次；而每次探都是一条真实命令 + 一个对话流可见节点。
   let tree = env.render(component, { sessionId: 'session-1' });
   await env.flush();
   tree = env.render(component, { sessionId: 'session-1' });
-  assert.deepEqual(harness.executed, [], '挂载不得产生任何命令（含 /memory status）');
+  env.render(component, { sessionId: 'session-1' });
 
-  // 未知态：不宣称任何状态
-  const chipUnknown = findByClass(tree, 'dshmem-tg');
-  assert.ok(chipUnknown !== null, '必须渲染开关 chip');
-  assert.equal('aria-pressed' in chipUnknown.props, false, '未知态不得给 aria-pressed');
-  assert.equal(chipUnknown.props['data-unknown'], 'true', '未知态必须有 data-unknown 标记');
-  assert.equal(textOf(chipUnknown), '记忆', '未知态文案是「记忆」');
-  assert.equal(findByClass(tree, 'dshmem-tg-bar'), null, '未知态不画斜杠');
-  // tooltip 也必须诚实：不能一边把主体做成中性，一边在悬停里宣称"已开启"
-  const tipUnknownText = textOf(findByClass(tree, 'dshmem-tg-tip'));
-  assert.ok(!tipUnknownText.includes('已开启'), '未知态 tooltip 不得宣称「已开启」');
-  assert.ok(tipUnknownText.includes('未知'), '未知态 tooltip 应当明说状态未知');
+  assert.deepEqual(harness.executed, [], '挂载与重渲染都不得产生任何命令');
 
-  // ── hover 懒探：这时才发一次 /memory status ──
-  hover(chipUnknown);
+  const chip = findByClass(tree, 'dshmem-tg');
+  assert.ok(chip !== null, '必须渲染开关 chip');
+  assert.equal(chip.props['aria-pressed'], true, '默认必须渲染成"开"（与宿主默认值一致）');
+  assert.equal(textOf(chip), '记忆', '开启时文案是「记忆」');
+  assert.equal(findByClass(tree, 'dshmem-tg-bar'), null, '开启态不画斜杠');
+  // 未知态已随口径整层移除：既不该有 data-unknown，也不该有中性外观
+  assert.equal(chip.props['data-unknown'], undefined, '默认即开，不得再有"未知态"标记');
+  assert.ok(
+    textOf(findByClass(tree, 'dshmem-tg-tip')).includes('点击关闭'),
+    'tooltip 必须说明点击会关闭（这才是本开关的唯一触发方式）',
+  );
+});
+
+test('记忆开关：悬停 / 键盘聚焦**不发任何命令**（用户定稿：只有点击才触发）', async () => {
+  const { registration } = load();
+  const env = liveReact();
+  const plugin = registration.factory(() => env.React);
+  const harness = makeToggleCtx({ hostOn: true });
+
+  plugin.apply(harness.ctx);
+  const component = harness.component();
+
+  let tree = env.render(component, { sessionId: 's' });
+  await env.flush();
+  tree = env.render(component, { sessionId: 's' });
+
+  const chip = findByClass(tree, 'dshmem-tg');
+  // ⚠️ 这两条是本用例的核心：早先实现把 probe 挂在 onMouseEnter / onFocus 上，
+  // 于是"鼠标划过就执行一次 /memory status"，在对话流里留下可见节点（宿主会写
+  // command/run + command/done 两条会话事件）。现在这两个 handler 必须**不存在**。
+  assert.equal(chip.props.onMouseEnter, undefined, '不得再挂 onMouseEnter（划过不该发命令）');
+  assert.equal(chip.props.onFocus, undefined, '不得再挂 onFocus（聚焦不该发命令）');
+
+  // 就算宿主把这两个事件真的派发下来（防御性：别的地方可能手工调用），也不该有任何命令。
+  // 这里直接调 onClick 之外的路径无 handler 可调，所以改为断言"整轮渲染后零命令"。
+  assert.deepEqual(harness.executed, [], '渲染与交互准备阶段不得有任何命令');
+  assert.equal(harness.statusCount(), 0, '不得存在任何 /memory status 回读');
+});
+
+test('记忆开关：点击发 /memory off 与 /memory on，且本地状态跟随', async () => {
+  const { registration } = load();
+  const env = liveReact();
+  const plugin = registration.factory(() => env.React);
+  const harness = makeToggleCtx({ hostOn: true });
+
+  plugin.apply(harness.ctx);
+  const component = harness.component();
+
+  let tree = env.render(component, { sessionId: 'session-1' });
   await env.flush();
   tree = env.render(component, { sessionId: 'session-1' });
 
-  assert.equal(harness.statusCount(), 1, 'hover 后应恰好发一次 /memory status');
-  const chipOn = findByClass(tree, 'dshmem-tg');
-  assert.equal(chipOn.props['aria-pressed'], true, '探到"开"后 chip 应为按下态');
-  assert.equal(chipOn.props['data-unknown'], undefined, '已知状态不应再带 data-unknown');
-  assert.equal(textOf(chipOn), '记忆', '开启时文案是「记忆」');
-
-  // ── 点一下：应当发 /memory off，本地状态跟随 ──
-  chipOn.props.onClick();
+  // ── 点一下：发 /memory off ──
+  findByClass(tree, 'dshmem-tg').props.onClick();
   await env.flush();
   tree = env.render(component, { sessionId: 'session-1' });
 
@@ -529,10 +556,7 @@ test('记忆开关：点击真的发 /memory off 与 /memory on，且本地状�
   const chipOff = findByClass(tree, 'dshmem-tg');
   assert.equal(chipOff.props['aria-pressed'], false, '切换后 chip 应变成未按下');
   assert.equal(textOf(chipOff), '记忆已关', '关闭时文案变「记忆已关」');
-  assert.ok(
-    findByClass(tree, 'dshmem-tg-bar') !== null,
-    '关闭时图标上必须叠 45° 斜杠（原型三态之一）',
-  );
+  assert.ok(findByClass(tree, 'dshmem-tg-bar') !== null, '关闭时图标上必须叠 45° 斜杠');
   assert.ok(
     textOf(findByClass(tree, 'dshmem-tg-tip')).includes('不注入记忆快照'),
     'tooltip 必须说明关闭后不注入记忆',
@@ -542,8 +566,8 @@ test('记忆开关：点击真的发 /memory off 与 /memory on，且本地状�
     'tooltip 必须说明五个 memory_* 工具不可见',
   );
 
-  // ── 再点一下：应当发 /memory on 并回到开启 ──
-  chipOff.props.onClick();
+  // ── 再点一下：发 /memory on 并回到开启 ──
+  findByClass(tree, 'dshmem-tg').props.onClick();
   await env.flush();
   tree = env.render(component, { sessionId: 'session-1' });
 
@@ -554,141 +578,13 @@ test('记忆开关：点击真的发 /memory off 与 /memory on，且本地状�
   assert.equal(textOf(chipBack), '记忆', '恢复后文案回到「记忆」');
   assert.equal(findByClass(tree, 'dshmem-tg-bar'), null, '恢复后斜杠必须消失');
 
-  // ── 回读次数纪律：整个流程只允许一次 status ──
-  // 每次 /memory status 都是真实命令执行，宿主会写 command/run + command/done，
-  // 而 ui-chat 会把它们渲染成可见的对话流节点（只隐藏 name==='permission'）。
-  assert.equal(harness.statusCount(), 1, `两次切换期间只允许 hover 时那一次回读，实际 ${harness.statusCount()} 次`);
+  // ── 命令纪律：整个流程只有用户点出来的两条命令，没有任何回读 ──
   assert.deepEqual(
     harness.lines(),
-    ['/memory status', '/memory off', '/memory on'],
-    '命令序列必须恰好是「探一次 → 关 → 开」，不得多出校正探针',
+    ['/memory off', '/memory on'],
+    '命令序列必须恰好是「关 → 开」，不得多出任何 status 回读',
   );
-});
-
-test('记忆开关：懒探——挂载不发命令、hover 才探、再次 hover 不重复探', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  const harness = makeToggleCtx({ hostOn: true });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  // 挂载 + 多轮重渲染：0 命令
-  let tree = env.render(component, { sessionId: 's' });
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  env.render(component, { sessionId: 's' });
-  assert.equal(harness.statusCount(), 0, '挂载与重渲染都不得发 /memory status');
-
-  // 第一次 hover：探一次
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(harness.statusCount(), 1, '第一次 hover 必须探一次');
-
-  // 再次 hover（含 onFocus）：命中缓存，不重复探
-  hover(findByClass(tree, 'dshmem-tg'));
-  findByClass(tree, 'dshmem-tg').props.onFocus();
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(harness.statusCount(), 1, '再次 hover / focus 必须命中缓存，不得重复探');
-  assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true);
-});
-
-test('记忆开关：未知态点击一次完成切换（不再需要点两次）', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  // 宿主侧其实是"开"的，但芯片还没探过（未知）
-  const harness = makeToggleCtx({ hostOn: true });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  let tree = env.render(component, { sessionId: 's' });
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-
-  const chip = findByClass(tree, 'dshmem-tg');
-  assert.equal(chip.props['data-unknown'], 'true', '前置条件：此刻是未知态');
-
-  // 一次点击就要完成切换：先探真值（开）→ 取反 → 发 off。
-  // 旧语义"先探一次、让用户再点一次"在真机上会被当成按钮坏了（未知态很常见：缓存只在内存里）。
-  chip.props.onClick();
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-
-  assert.deepEqual(
-    harness.lines(),
-    ['/memory status', '/memory off'],
-    '未知态一次点击必须探真值后紧接着下发 off',
-  );
-  assert.equal(harness.hostOn(), false, '宿主状态必须真的被改到');
-  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '一次点击后芯片必须显示「记忆已关」');
-});
-
-test('记忆开关：未知态 + 探测到"已关闭" → 点击发 /memory on（不是再发一次 off）', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  // 宿主侧是"关"的，芯片未知
-  const harness = makeToggleCtx({ hostOn: false });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  let tree = env.render(component, { sessionId: 's' });
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(findByClass(tree, 'dshmem-tg').props['data-unknown'], 'true', '前置条件：未知态');
-
-  findByClass(tree, 'dshmem-tg').props.onClick();
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-
-  assert.deepEqual(
-    harness.lines(),
-    ['/memory status', '/memory on'],
-    '探到"已关闭"后点击必须发 on：再发一次 off 就是 noop，用户会以为点了没用',
-  );
-  assert.equal(harness.hostOn(), true, '宿主状态必须变成开');
-  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆', '芯片必须回到「记忆」');
-});
-
-test('记忆开关：探不到状态（无 commands 命名空间）时，未知态点击按"关"一次完成', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  const harness = makeToggleCtx({ hasCommands: false });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  let tree = env.render(component, { sessionId: 's' });
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-
-  // 懒探不可用 → 一直未知态，但必须正常渲染
-  const chip = findByClass(tree, 'dshmem-tg');
-  assert.ok(chip !== null, '没有 commands 服务时组件必须仍然渲染（不得把输入区炸掉）');
-  assert.equal(chip.props['data-unknown'], 'true');
-  hover(chip);
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(
-    findByClass(tree, 'dshmem-tg').props['data-unknown'],
-    'true',
-    '探不到就保持未知，不得猜',
-  );
-
-  // 未知态 + 探不到 → 一次点击直接按"关"下发（用户主动点开关，意图多半是关掉；重复 off 幂等）
-  findByClass(tree, 'dshmem-tg').props.onClick();
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.deepEqual(harness.lines(), ['/memory off'], '探不到时点击必须直接发一次 /memory off');
-  assert.equal(harness.hostOn(), false, '宿主状态必须变成关');
-  assert.ok(findByClass(tree, 'dshmem-tg') !== null, '仍然正常渲染');
+  assert.equal(harness.statusCount(), 0, '不得有任何 /memory status');
 });
 
 test('记忆开关：busy 期间重复点击只发一次命令', async () => {
@@ -700,14 +596,9 @@ test('记忆开关：busy 期间重复点击只发一次命令', async () => {
   plugin.apply(harness.ctx);
   const component = harness.component();
 
-  // 先 hover 确知为"开"
   let tree = env.render(component, { sessionId: 's' });
   await env.flush();
   tree = env.render(component, { sessionId: 's' });
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true);
 
   // 第一次点击 → 进入 busy；中间渲染一轮（真实 React 会在两次点击之间重渲染）
   findByClass(tree, 'dshmem-tg').props.onClick();
@@ -720,7 +611,7 @@ test('记忆开关：busy 期间重复点击只发一次命令', async () => {
   await env.flush();
   tree = env.render(component, { sessionId: 's' });
 
-  assert.deepEqual(harness.lines(), ['/memory status', '/memory off'], 'busy 期间的重复点击不得重复发命令');
+  assert.deepEqual(harness.lines(), ['/memory off'], 'busy 期间的重复点击不得重复发命令');
   assert.equal(
     harness.executed.filter((entry) => entry.line === '/memory off').length,
     1,
@@ -729,54 +620,7 @@ test('记忆开关：busy 期间重复点击只发一次命令', async () => {
   assert.equal(findByClass(tree, 'dshmem-tg').props.disabled, false, '落地后必须解除 disabled');
 });
 
-test('记忆开关：切会话后旧会话的迟到 probe 结果不得触发 commit', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  /** @type {() => void} */
-  let releaseProbe = () => {};
-  const probeGate = new Promise((resolve) => {
-    releaseProbe = () => resolve();
-  });
-  // s1 是"开"，但芯片未知；probe 被闸门挡住
-  const harness = makeToggleCtx({ hostOn: true, gate: probeGate });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  // s1 未知态点击 → setBusy(true) + probe 发出（被挡住）
-  let tree = env.render(component, { sessionId: 's1' });
-  await env.flush();
-  tree = env.render(component, { sessionId: 's1' });
-  findByClass(tree, 'dshmem-tg').props.onClick();
-  assert.deepEqual(harness.lines(), ['/memory status'], '点击应只发出 probe');
-
-  // 切到 s2
-  tree = env.render(component, { sessionId: 's2' });
-
-  // 让 s1 的 probe 返回
-  releaseProbe();
-  await env.flush();
-  tree = env.render(component, { sessionId: 's2' });
-
-  // 旧会话的迟到结果绝不能触发 commit：那会把开关命令打到用户已经离开的会话上
-  assert.deepEqual(
-    harness.lines(),
-    ['/memory status'],
-    '切走后不得用旧会话的 probe 结果下发命令',
-  );
-  assert.equal(harness.hostOn(), true, '宿主状态不得被改动');
-
-  // 而且 busy 必须被清掉：busy 是组件级状态，而组件**不会**因换会话重挂载
-  // （宿主 renderEntry 不给 key），漏清会让芯片在【所有】会话上永久 disabled = 按钮坏了。
-  assert.equal(
-    findByClass(tree, 'dshmem-tg').props.disabled,
-    false,
-    '切会话后必须解除 busy，否则芯片永久变成"点不动"',
-  );
-});
-
-test('记忆开关：订阅 command/executed——用户手打 /memory off 时芯片要跟着变', async () => {
+test('记忆开关：订阅 command/executed——用户手打 /memory off 时芯片要跟着变（用宿主真实文案）', async () => {
   const { registration } = load();
   const env = liveReact();
   const plugin = registration.factory(() => env.React);
@@ -791,46 +635,49 @@ test('记忆开关：订阅 command/executed——用户手打 /memory off 时�
   // 订阅装在 useEffect 里，所以必须渲染过一轮才会登记（这正是"渲染前不该有副作用"的正确行为）
   assert.equal(harness.commandExecutedListeners.length, 1, '渲染后必须订阅一次 command/executed');
 
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true, '前置条件：当前显示为"开"');
-
   const emit = harness.commandExecutedListeners[0];
+  // ⚠️ 这里刻意用**宿主真正产出的文案**（`toggleResultText`），而不是手写的理想字符串。
+  // 早先的用例喂的是伪造的 `'状态：记忆已关闭'`，于是掩盖了一个真缺陷：
+  // `/memory off` 的结果文案当时**不带**状态标记，订阅永远解析失败，
+  // 用户手打关闭后芯片会一直显示"开启"（review P0-2 那类"骗用户"）。
+  const host = await import('../src/memory-toggle.js');
+  const offText = host.toggleResultText(false, true);
+  const onText = host.toggleResultText(true, true);
 
   // 别的会话：不得影响本会话芯片
-  emit('other-session', 'memory', { kind: 'success', text: '状态：记忆已关闭' });
+  emit('other-session', 'memory', { kind: 'success', text: offText });
   tree = env.render(component, { sessionId: 's' });
   assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true, '别的会话的事件不得改本会话');
 
   // 别的命令名：不得影响
-  emit('s', 'export', { kind: 'success', text: '状态：记忆已关闭' });
+  emit('s', 'export', { kind: 'success', text: offText });
   tree = env.render(component, { sessionId: 's' });
   assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true, '非 memory 命令不得改芯片');
 
   // 失败结果：不得改
-  emit('s', 'memory', { kind: 'error', text: '状态：记忆已关闭' });
+  emit('s', 'memory', { kind: 'error', text: offText });
   tree = env.render(component, { sessionId: 's' });
   assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true, 'kind!==success 不得改芯片');
 
   // 正例：用户手打 /memory off → 芯片变「记忆已关」
-  emit('s', 'memory', { kind: 'success', text: '状态：记忆已关闭' });
+  emit('s', 'memory', { kind: 'success', text: offText });
   tree = env.render(component, { sessionId: 's' });
   const chip = findByClass(tree, 'dshmem-tg');
-  assert.equal(chip.props['aria-pressed'], false, '收到 success 事件后必须变"关"');
+  assert.equal(chip.props['aria-pressed'], false, '收到 success 事件后必须变"关"（宿主文案必须带状态标记）');
   assert.equal(textOf(chip), '记忆已关', '收到 success 事件后文案必须变「记忆已关」');
   assert.ok(findByClass(tree, 'dshmem-tg-bar') !== null, '收到 success 事件后必须画出斜杠');
 
   // 反向：再开回来
-  emit('s', 'memory', { kind: 'success', text: '状态：记忆已开启' });
+  emit('s', 'memory', { kind: 'success', text: onText });
   tree = env.render(component, { sessionId: 's' });
   assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆', '收到"已开启"事件后必须变回「记忆」');
 
   // 事件驱动的更新不得产生任何命令
-  assert.equal(harness.statusCount(), 1, '事件订阅不得额外发 status');
+  assert.equal(harness.statusCount(), 0, '事件订阅不得额外发 status');
+  assert.deepEqual(harness.executed, [], '整条订阅路径都不该产生命令');
 });
 
-test('记忆开关：同一会话重挂载/换会话——缓存带结果、不重复回读', async () => {
+test('记忆开关：换会话时状态必须跟随（不得沿用上一个会话的显示）', async () => {
   const { registration } = load();
   const env = liveReact();
   const plugin = registration.factory(() => env.React);
@@ -839,57 +686,50 @@ test('记忆开关：同一会话重挂载/换会话——缓存带结果、不�
   plugin.apply(harness.ctx);
   const component = harness.component();
 
-  // s1：hover 探一次
+  // s1：点一下关掉
   let tree = env.render(component, { sessionId: 's1' });
   await env.flush();
   tree = env.render(component, { sessionId: 's1' });
-  hover(findByClass(tree, 'dshmem-tg'));
+  findByClass(tree, 'dshmem-tg').props.onClick();
   await env.flush();
   tree = env.render(component, { sessionId: 's1' });
-  assert.equal(harness.statusCount(), 1, 's1 首次 hover 探一次');
-  assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true);
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '前置条件：s1 已关');
 
-  // 换到 s2：必须为新会话重新探（状态是按会话隔离的）
+  // 换到 s2：宿主口径"缺席 = 开"，所以必须显示「记忆」（默认开），不得沿用 s1 的「记忆已关」。
+  // 宿主渲染槽位条目**不给 key**，换会话不会重挂载组件，所以这里量的是 shownRef 的跟随逻辑。
   tree = env.render(component, { sessionId: 's2' });
   await env.flush();
   tree = env.render(component, { sessionId: 's2' });
-  assert.equal(findByClass(tree, 'dshmem-tg').props['data-unknown'], 'true', '换到没探过的会话应是未知态');
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  tree = env.render(component, { sessionId: 's2' });
-  assert.equal(harness.statusCount(), 2, '换会话必须重新回读');
+  const chipS2 = findByClass(tree, 'dshmem-tg');
+  assert.equal(textOf(chipS2), '记忆', '换到没关过的会话必须显示默认「记忆」');
+  assert.equal(chipS2.props['aria-pressed'], true, 's2 必须渲染成"开"');
+  assert.equal(findByClass(tree, 'dshmem-tg-bar'), null, 's2 不得画出 s1 的"已关"斜杠');
 
-  // 换回 s1：命中缓存，不重复探，且立刻显示真实状态
+  // 换回 s1：必须用缓存立刻显示"关"，且不产生任何命令
   tree = env.render(component, { sessionId: 's1' });
   await env.flush();
   tree = env.render(component, { sessionId: 's1' });
-  assert.equal(
-    findByClass(tree, 'dshmem-tg').props['aria-pressed'],
-    true,
-    '换回已探过的会话必须直接用缓存状态渲染，不得退回"未知"',
-  );
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  assert.equal(harness.statusCount(), 2, '换回已探过的会话 hover 也不得再发 status');
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '换回已关过的会话必须立刻显示「记忆已关」');
+  assert.deepEqual(harness.lines(), ['/memory off'], '换会话不得产生任何额外命令');
 });
 
-test('记忆开关：重挂载时不得把已关闭的会话显示成开启（缓存必须带结果）', async () => {
+test('记忆开关：重挂载后不得把已关闭的会话显示成开启（缓存必须带结果）', async () => {
   const { registration } = load();
   const env = liveReact();
   const plugin = registration.factory(() => env.React);
-  const harness = makeToggleCtx({ hostOn: false }); // 宿主侧是「关」
+  const harness = makeToggleCtx({ hostOn: true });
 
   plugin.apply(harness.ctx);
   const component = harness.component();
 
-  // hover 探到"关"
+  // 点一下关掉
   let tree = env.render(component, { sessionId: 'off-session' });
   await env.flush();
   tree = env.render(component, { sessionId: 'off-session' });
-  hover(findByClass(tree, 'dshmem-tg'));
+  findByClass(tree, 'dshmem-tg').props.onClick();
   await env.flush();
   tree = env.render(component, { sessionId: 'off-session' });
-  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '探到关闭后必须显示「记忆已关」');
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '前置条件：已关');
 
   // 真正模拟"卸载后重新挂载"：丢掉组件状态，插件闭包（含状态缓存）仍活着
   env.unmount();
@@ -898,137 +738,16 @@ test('记忆开关：重挂载时不得把已关闭的会话显示成开启（�
   tree = env.render(component, { sessionId: 'off-session' });
 
   const chip = findByClass(tree, 'dshmem-tg');
-  assert.equal(chip.props['aria-pressed'], false, '重挂载后必须仍是"关"：退回未知就是在骗用户');
-  assert.equal(chip.props['data-unknown'], undefined, '重挂载后不得退回未知态');
+  assert.equal(chip.props['aria-pressed'], false, '重挂载后必须仍是"关"：退回默认"开"就是在骗用户');
   assert.equal(textOf(chip), '记忆已关', '重挂载后文案必须仍是「记忆已关」');
   assert.ok(findByClass(tree, 'dshmem-tg-bar') !== null, '重挂载后斜杠必须仍在');
-  assert.equal(harness.statusCount(), 1, '重挂载不得再发 status（缓存已带结果）');
-});
-
-test('记忆开关：回读途中重挂载也要拿到结果（共享同一个进行中的回读）', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  /** @type {() => void} */
-  let releaseProbe = () => {};
-  const probeGate = new Promise((resolve) => {
-    releaseProbe = () => resolve();
-  });
-  const harness = makeToggleCtx({ hostOn: false, gate: probeGate });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  // 第一次 hover：发出回读，但**还没返回**
-  let tree = env.render(component, { sessionId: 's' });
-  hover(findByClass(tree, 'dshmem-tg'));
-  assert.equal(harness.statusCount(), 1, 'hover 应发出一次回读');
-
-  // 回读途中卸载并重新挂载（真实场景：输入区随会话切换重挂载），再 hover 一次
-  env.unmount();
-  tree = env.render(component, { sessionId: 's' });
-  hover(findByClass(tree, 'dshmem-tg'));
-  assert.equal(harness.statusCount(), 1, '回读途中重挂载不得再发一次命令（应复用进行中的那次）');
-
-  // 现在让回读返回
-  releaseProbe();
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-
-  const chip = findByClass(tree, 'dshmem-tg');
-  assert.equal(textOf(chip), '记忆已关', '重挂载后的实例必须也能拿到进行中回读的结果，不得停在"未知"');
-  assert.equal(chip.props['aria-pressed'], false);
-});
-
-test('记忆开关：status 认不出时不写缓存，下次交互会重试（不被一次失败锁死）', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  // 旧宿主的 status 返回不含约定的状态标记
-  const harness = makeToggleCtx({ statusText: '/memory 用法说明' });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  // 第一次 hover：探了，但认不出 → 仍是未知态
-  let tree = env.render(component, { sessionId: 's' });
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(harness.statusCount(), 1, '第一次 hover 应探一次');
-  assert.equal(
-    findByClass(tree, 'dshmem-tg').props['data-unknown'],
-    'true',
-    '认不出时必须停在未知态，不得猜成开或关',
-  );
-
-  // 宿主这次能给出标记了 → 第二次 hover 必须重试并成功（null 不得进缓存）
-  harness.setStatusText('状态：记忆已关闭');
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(harness.statusCount(), 2, 'null 结果不得写进缓存，下次交互必须重试');
-  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '重试成功后必须显示真实状态');
-});
-
-test('记忆开关：切会话后旧会话的迟到结果不得覆盖新会话显示', async () => {
-  const { registration } = load();
-  const env = liveReact();
-  const plugin = registration.factory(() => env.React);
-  /** @type {() => void} */
-  let releaseProbe = () => {};
-  const probeGate = new Promise((resolve) => {
-    releaseProbe = () => resolve();
-  });
-  // s1 是「关」；s2 从未探过
-  const harness = makeToggleCtx({ hostOn: false, gate: probeGate });
-
-  plugin.apply(harness.ctx);
-  const component = harness.component();
-
-  // s1 上 hover：回读发出，但被闸门挡住（还在途中）
-  let tree = env.render(component, { sessionId: 's1' });
-  hover(findByClass(tree, 'dshmem-tg'));
-  assert.equal(harness.statusCount(), 1, 's1 上应发出一次回读');
-
-  // 切到 s2：此刻 s2 是未知态
-  tree = env.render(component, { sessionId: 's2' });
-  assert.equal(
-    findByClass(tree, 'dshmem-tg').props['data-unknown'],
-    'true',
-    '切到没探过的 s2 必须是未知态',
-  );
-
-  // 现在让 s1 那次回读返回（结果是"关"）
-  releaseProbe();
-  await env.flush();
-  tree = env.render(component, { sessionId: 's2' });
-
-  // s1 的迟到结果绝不能写到 s2 的显示上（否则 s2 会显示成 s1 的状态 = 骗用户）
-  const chip = findByClass(tree, 'dshmem-tg');
-  assert.equal(
-    chip.props['data-unknown'],
-    'true',
-    's1 的迟到结果不得覆盖 s2：s2 仍应是未知态',
-  );
-  assert.equal(textOf(chip), '记忆', 's2 不得显示成 s1 的「记忆已关」');
-  assert.equal(chip.props['aria-pressed'], undefined, 's2 仍未知，不得给 aria-pressed');
-
-  // 但结果本身应当进了 s1 的缓存：切回 s1 立刻显示"关"，且不重复发命令
-  tree = env.render(component, { sessionId: 's1' });
-  await env.flush();
-  tree = env.render(component, { sessionId: 's1' });
-  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '切回 s1 应立刻显示缓存的"关"');
-  assert.equal(harness.statusCount(), 1, '切回已探过的会话不得再发命令');
+  assert.deepEqual(harness.lines(), ['/memory off'], '重挂载不得产生任何命令');
 });
 
 test('记忆开关：旧宿主不认 /memory（matched=false）时不得假装切成功', async () => {
   const { registration } = load();
   const env = liveReact();
   const plugin = registration.factory(() => env.React);
-  // status 能探到"开"，但写命令不被识别（旧宿主）
   const harness = makeToggleCtx({ hostOn: true, matched: false });
 
   plugin.apply(harness.ctx);
@@ -1037,10 +756,7 @@ test('记忆开关：旧宿主不认 /memory（matched=false）时不得假装�
   let tree = env.render(component, { sessionId: 's' });
   await env.flush();
   tree = env.render(component, { sessionId: 's' });
-  hover(findByClass(tree, 'dshmem-tg'));
-  await env.flush();
-  tree = env.render(component, { sessionId: 's' });
-  assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true, '前置条件：已知为"开"');
+  assert.equal(findByClass(tree, 'dshmem-tg').props['aria-pressed'], true, '前置条件：默认开');
 
   // 点击：命令发出但宿主不认 → UI 必须保持"开"，不得翻成"已关"
   findByClass(tree, 'dshmem-tg').props.onClick();
@@ -1053,6 +769,38 @@ test('记忆开关：旧宿主不认 /memory（matched=false）时不得假装�
   assert.equal(findByClass(tree, 'dshmem-tg-bar'), null, 'matched=false 时不得画出"已关"的斜杠');
 });
 
+test('记忆开关：本地显示与宿主不一致时，点击是自愈的（幂等 noop + 事件纠正）', async () => {
+  const { registration } = load();
+  const env = liveReact();
+  const plugin = registration.factory(() => env.React);
+  // 宿主侧其实已经关掉了（例如上一份文档里关过、页面刷新后客户端缓存丢失），
+  // 但芯片按默认值显示"开"——这是"默认即开"口径下唯一的状态不一致窗口。
+  const harness = makeToggleCtx({ hostOn: false });
+
+  plugin.apply(harness.ctx);
+  const component = harness.component();
+
+  let tree = env.render(component, { sessionId: 's' });
+  await env.flush();
+  tree = env.render(component, { sessionId: 's' });
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆', '前置条件：本地按默认值显示"开"');
+
+  // 用户点一下（意图是关）：下发 /memory off —— 在宿主侧是幂等 noop，
+  // 其返回文案带 `状态：记忆已关闭` 标记，订阅随即把芯片纠正过来。
+  findByClass(tree, 'dshmem-tg').props.onClick();
+  await env.flush();
+  tree = env.render(component, { sessionId: 's' });
+
+  assert.deepEqual(harness.lines(), ['/memory off'], '点击只应发一条 /memory off（不做"先探再取反"）');
+  assert.equal(harness.hostOn(), false, '宿主状态保持关闭（noop 不得把它打开）');
+
+  // 模拟宿主把 noop 结果回执给客户端
+  const host = await import('../src/memory-toggle.js');
+  harness.commandExecutedListeners[0]('s', 'memory', { kind: 'success', text: host.toggleResultText(false, false) });
+  tree = env.render(component, { sessionId: 's' });
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '宿主回执必须把芯片纠正成「记忆已关」');
+});
+
 test('记忆开关：会话未打开时点击不发命令且不崩', async () => {
   const { registration } = load();
   const env = liveReact();
@@ -1062,7 +810,7 @@ test('记忆开关：会话未打开时点击不发命令且不崩', async () =>
   const commands = [];
   /** @type {any} */
   const ctx = {
-    remote: { workspaceFiles: {}, commands: {} },
+    remote: { workspaceFiles: {} },
     sessions: {
       async using(target, options, operation) {
         return await operation({
@@ -1106,6 +854,124 @@ test('记忆开关：会话未打开时点击不发命令且不崩', async () =>
 
   assert.deepEqual(commands, [], '会话未打开时不得发命令');
   assert.ok(findByClass(tree, 'dshmem-tg') !== null, '失败后组件必须仍然渲染（不得把输入区炸掉）');
+});
+
+test('记忆开关：写命令 reject 时必须清 busy（否则按钮永久 disabled）', async () => {
+  const { registration } = load();
+  const env = liveReact();
+  const plugin = registration.factory(() => env.React);
+  const harness = makeToggleCtx({ hostOn: true, failWrite: true });
+
+  plugin.apply(harness.ctx);
+  const component = harness.component();
+
+  let tree = env.render(component, { sessionId: 's' });
+  await env.flush();
+  tree = env.render(component, { sessionId: 's' });
+
+  findByClass(tree, 'dshmem-tg').props.onClick();
+  await env.flush();
+  tree = env.render(component, { sessionId: 's' });
+
+  // 旧实现曾有一个"busy 永久卡死"的真缺陷（早退路径漏了 setBusy(false)），
+  // 后果是芯片在**所有**会话上永久 disabled = 用户看到"按钮坏了"。这条守住失败路径。
+  assert.equal(
+    findByClass(tree, 'dshmem-tg').props.disabled,
+    false,
+    '写命令失败后必须解除 busy，否则按钮永久点不动',
+  );
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆', '失败后不得假装切成功（保持原显示）');
+});
+
+test('记忆开关：切会话途中旧会话的迟到结果不得改新会话显示', async () => {
+  const { registration } = load();
+  const env = liveReact();
+  const plugin = registration.factory(() => env.React);
+  /** @type {() => void} */
+  let releaseWrite = () => {};
+  const writeGate = new Promise((resolve) => {
+    releaseWrite = () => resolve();
+  });
+  const harness = makeToggleCtx({ hostOn: true, gate: writeGate });
+
+  plugin.apply(harness.ctx);
+  const component = harness.component();
+
+  // s1 上点击 → 写命令发出但被闸门挡住（还在途中）
+  let tree = env.render(component, { sessionId: 's1' });
+  await env.flush();
+  tree = env.render(component, { sessionId: 's1' });
+  findByClass(tree, 'dshmem-tg').props.onClick();
+  assert.deepEqual(harness.lines(), ['/memory off'], '点击应立即发出 /memory off');
+
+  // 切到 s2（s2 从未被关过 → 应显示默认「记忆」）
+  tree = env.render(component, { sessionId: 's2' });
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆', '前置条件：s2 显示默认开');
+
+  // 现在让 s1 的写命令落地
+  releaseWrite();
+  await env.flush();
+  tree = env.render(component, { sessionId: 's2' });
+
+  // s1 的迟到结果绝不能写到 s2 的显示上（否则 s2 会显示成 s1 的状态 = 骗用户）
+  assert.equal(
+    textOf(findByClass(tree, 'dshmem-tg')),
+    '记忆',
+    's1 的迟到结果不得把 s2 显示成「记忆已关」',
+  );
+  assert.equal(findByClass(tree, 'dshmem-tg-bar'), null, 's2 不得画出 s1 的"已关"斜杠');
+
+  // 但结果应当已写进 s1 的缓存：切回 s1 立刻显示"关"
+  tree = env.render(component, { sessionId: 's1' });
+  await env.flush();
+  tree = env.render(component, { sessionId: 's1' });
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '切回 s1 应立刻显示缓存的"关"');
+});
+
+test('记忆开关：换会话时旧订阅必须撤销并重新订阅（不得泄漏）', async () => {
+  const { registration } = load();
+  const env = liveReact();
+  const plugin = registration.factory(() => env.React);
+  const harness = makeToggleCtx({ hostOn: true });
+
+  plugin.apply(harness.ctx);
+  const component = harness.component();
+
+  let tree = env.render(component, { sessionId: 's1' });
+  await env.flush();
+  assert.equal(harness.commandExecutedListeners.length, 1, 's1 渲染后应恰好有一个活跃订阅');
+  assert.equal(harness.unsubscribeCount(), 0, '未换会话前不该撤销订阅');
+
+  // 换到 s2：useEffect 依赖 [sessionId] → 必须先撤销旧订阅再订阅新的
+  tree = env.render(component, { sessionId: 's2' });
+  await env.flush();
+  assert.equal(harness.unsubscribeCount(), 1, '换会话必须撤销旧订阅（否则订阅泄漏、旧会话事件仍会改显示）');
+  assert.equal(harness.commandExecutedListeners.length, 1, '换会话后必须恰好仍有一个活跃订阅（不能多也不能少）');
+
+  // 新订阅必须绑定 s2：给 s2 发事件才生效
+  harness.commandExecutedListeners[0]('s2', 'memory', { kind: 'success', text: '状态：记忆已关闭' });
+  tree = env.render(component, { sessionId: 's2' });
+  assert.equal(textOf(findByClass(tree, 'dshmem-tg')), '记忆已关', '换会话后的订阅必须绑定新会话');
+
+  // 卸载时必须撤销订阅（组件卸载不留下挂在宿主事件上的 listener）
+  env.unmount();
+  assert.equal(harness.unsubscribeCount(), 2, '卸载时必须撤销订阅');
+});
+
+test('回归守卫：开关不得再挂悬停探针，也不得再有 /memory status 回读', () => {
+  // 这两样都是"鼠标划过就产生副作用"的来源（悬停即执行真命令、在对话流留可见节点）。
+  // 用源码级断言钉住，防止将来有人为了"显示更准"把它们加回来。
+  //
+  // 只钉"探针挂载"与"回读通路"这两种**可执行形态**，不钉注释里对历史的说明
+  // （注释里出现 `/memory status` 是在解释为什么不做，那是应该保留的信息）。
+  assert.ok(!/onMouseEnter:\s*probe/.test(SOURCE), '不得再把 probe 挂到 onMouseEnter 上');
+  assert.ok(!/onFocus:\s*probe/.test(SOURCE), '不得再把 probe 挂到 onFocus 上');
+  assert.ok(!/function probe\s*\(/.test(SOURCE), 'probe 函数本身应当已整层移除');
+  assert.ok(!/readCommandText/.test(SOURCE), '回读辅助函数应当已整层移除');
+  assert.ok(
+    !/commands\.execute\(/.test(SOURCE),
+    '开关不得再调 remote.commands.execute：那会执行真命令并在对话流留下可见节点',
+  );
 });
 
 test('parseToggleStatus：只认宿主契约的两个标记，认不出返回 null', () => {
@@ -1187,38 +1053,41 @@ test('开关常量：槽位/ID/order 与已评审原型一致', () => {
   assert.ok(tipOff.main.includes('点击开启'), '关闭态要给出恢复路径');
 });
 
-test('toggleTooltip：未知态不得宣称"已开启"（P0-2 的同一类错误）', () => {
+test('toggleTooltip：两态文案各自诚实，且都说清关闭的后果', () => {
   const { exports } = load({ window: false });
-  const tipUnknown = exports.toggleTooltip(null);
   const tipOn = exports.toggleTooltip(true);
+  const tipOff = exports.toggleTooltip(false);
 
-  // 芯片主体在未知态是诚实的（中性外观 + aria-pressed 缺省 + data-unknown），
-  // tooltip 不能反过来宣称一个状态——那只是换个地方继续骗用户。
-  assert.notEqual(tipUnknown.main, tipOn.main, '未知态 tooltip 必须与"确知开启"不同');
-  assert.ok(!tipUnknown.main.includes('已开启'), '未知态不得出现「已开启」');
-  assert.ok(!tipUnknown.main.includes('已关闭'), '未知态不得出现「已关闭」');
-  assert.ok(tipUnknown.main.includes('未知'), '未知态应当明说状态未知');
-  // 点击语义是"先探真值再取反"，所以未知态不能承诺"点击关闭"
-  assert.ok(!tipUnknown.main.includes('点击关闭'), '未知态不得承诺"点击关闭"（实际是先探再取反）');
-  // 但"关闭的后果"这条教育性信息应当保留
-  assert.ok(tipUnknown.sub.includes('五个 memory_* 工具不可见'), '未知态仍须说明关闭的后果');
+  // 用户 2026-10-11 定稿"默认就是开启状态"后，未知态已从组件里整层移除，
+  // 所以这里只钉两态：开态说明"当前开着 + 点击关闭"，关态说明"当前关着 + 点击开启"。
+  assert.ok(tipOn.main.includes('已开启'), '开启态 tooltip 要说明当前是开的');
+  assert.ok(tipOn.main.includes('点击关闭'), '开启态必须说明点击会关闭（这是唯一触发方式）');
+  assert.ok(tipOff.main.includes('已关闭'), '关闭态 tooltip 要说明当前是关的');
+  assert.ok(tipOff.main.includes('点击开启'), '关闭态要给出恢复路径');
+  assert.notEqual(tipOn.main, tipOff.main, '两态文案必须可区分，否则用户分不清当前状态');
+
+  // 两态都必须说清"关闭的后果"（教育性信息，与状态无关）
+  for (const [label, tip] of [['开', tipOn], ['关', tipOff]]) {
+    assert.ok(tip.sub.includes('不注入记忆快照'), `${label}态 tooltip 必须说明关闭后不注入记忆`);
+    assert.ok(tip.sub.includes('五个 memory_* 工具不可见'), `${label}态 tooltip 必须说明五个工具不可见`);
+  }
 });
 
-test('CSS 覆盖开关三态（含未知态），且选择器都带 dshmem- 前缀', () => {
+test('CSS 覆盖开关两态，且选择器都带 dshmem- 前缀', () => {
   const { exports } = load({ window: false });
   const css = exports.CSS;
   for (const token of [
     '.dshmem-tg {',
     '.dshmem-tg[aria-pressed=true]',
     '.dshmem-tg[aria-pressed=false]',
-    // review P0-2：未知态必须有独立的中性外观（既不是"开"的实底，也不是"关"的降级+斜杠）
-    '.dshmem-tg[data-unknown=true]',
     '.dshmem-tg-bar',
     '.dshmem-tg-tip',
     '.dshmem-tg-wrap:hover .dshmem-tg-tip',
   ]) {
     assert.ok(css.includes(token), `样式表必须含 ${token}`);
   }
+  // 未知态已随口径移除：CSS 里不该再有它的选择器（留着会让人以为还有第三态）
+  assert.ok(!css.includes('[data-unknown'), '未知态样式应当已整层移除');
   // 这份 CSS 会注入宿主页面 head：任何不带前缀的选择器都可能改到宿主（含别的插件）的样式
   const selectors = css.split('\n').filter((line) => line.includes('{') && !line.trim().startsWith('--'));
   for (const line of selectors) {

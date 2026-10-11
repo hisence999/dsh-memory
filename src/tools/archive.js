@@ -16,7 +16,7 @@
  * 五个工具从该会话可见面消失（`restrict`，只能经 `agent.ctx`）。
  */
 
-import { TOGGLE_TOOL_NAMES, toggleResultText, toggleVerbOf, withToggleUsage } from '../memory-toggle.js';
+import { TOGGLE_STATUS_OFF_TEXT, TOGGLE_STATUS_ON_TEXT, TOGGLE_TOOL_NAMES, toggleResultText, toggleVerbOf, withToggleUsage } from '../memory-toggle.js';
 import { asRecord, asStringList, boundarySectionText, canonicalId, checkCall, defineMemoryTool, failResult, joinSections, modulesOf, nowOf, okResult, storeWarningsSection, takeBoundaryWarnings, throwParamError, todayOf, workspaceOf, warningsSection } from './shared.js';
 
 const TOOL = 'memory_archive';
@@ -224,10 +224,12 @@ export const MEMORY_COMMAND_USAGE = withToggleUsage(
 
 /**
  * `status` 子命令的状态标记：**机器可判定**，客户端按这两个字符串初始化开关 UI
- * （跨半边契约，task-1：`/memory status` 的返回文本里必须固定含其中之一）。
+ * （跨半边契约：`/memory status` 与 `/memory on|off` 的返回文本里必须固定含其中之一）。
+ *
+ * 定义在 `src/memory-toggle.js`（与结果文案同一处），这里只做再导出，
+ * 保持既有 import 路径（`test/command-memory.test.js` 等）不变，且杜绝两份文案漂移。
  */
-export const TOGGLE_STATUS_ON_TEXT = '状态：记忆已开启';
-export const TOGGLE_STATUS_OFF_TEXT = '状态：记忆已关闭';
+export { TOGGLE_STATUS_OFF_TEXT, TOGGLE_STATUS_ON_TEXT };
 
 /** `/memory status` 的动词（不是开关动词，`toggleVerbOf` 不认它，故单独判定）。 */
 const TOGGLE_STATUS_VERB = 'status';
@@ -339,9 +341,13 @@ export function createMemoryCommand(deps) {
 /**
  * `/memory status` 的返回文本：**只读**，不改开关、不施加/撤销 restrict、不碰任何文件。
  *
- * 跨半边契约（task-1）：状态行**固定**写成 `状态：记忆已开启` / `状态：记忆已关闭`
- * ——客户端 `session.command('/memory status')` 后按这两个字符串判定开关 UI 的初始位置。
+ * 跨半边契约：状态行**固定**写成 `状态：记忆已开启` / `状态：记忆已关闭`
+ * ——客户端 `client/memory-panel.js` 的 `parseToggleStatus` 按这两个字符串判定开关 chip 的位置。
  * 因此这一行必须原样出现在文本里（前缀/后缀都不行），改一个字就等于改协议。
+ *
+ * 客户端**不再**主动调 `/memory status` 回读（那会在对话流留下可见节点）；
+ * 它现在只在用户手打 `/memory status` 时，靠 `command/executed` 事件拿到这份文本。
+ * 本命令仍然保留：它是用户手动查询状态的入口，也是 `command/executed` 通路的输入。
  *
  * @param {any} deps 装配层注入的 deps（读 `deps.toggleState`）
  * @param {string} sessionId
