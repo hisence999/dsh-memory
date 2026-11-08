@@ -411,6 +411,81 @@ test('未知 lineage（有 parentSession、isSeeded 不明确）：隔离，不�
   );
 });
 
+test('恢复/重开的顶层会话未经 agent/created 重新登记时，仍可按 header 兜底写入（2026-11-08 真机 P0 回归）', async () => {
+  const workspace = makeWorkspace();
+  const host = makeHost();
+  apply(host.ctx, resolveConfig({}).config);
+
+  // 真机形态：正常会话先登记，随后被 disposed（白名单 remove），再以同一 session id 重建，
+  // 但这次**没有**再触发可观测的 agent/created 边界（或边界提前 return 未走到 allowlist.add）。
+  // 效果就是：五个工具仍然可见（从未 restrict），可写入却永远被拒成"未登记会话"。
+  const before = makeAgent('session-a25d59f4', workspace);
+  await host.fire('agent/created', { agent: before, source: 'startup' });
+  await host.fire('agent/disposed', { agent: before });
+
+  const revived = makeAgent('session-a25d59f4', workspace); // 同一 id、标准顶层 header（delegationDepth=0）
+  const writeTool = host.tools.find((definition) => definition.name === 'memory_write');
+  assert.ok(writeTool, 'memory_write 必须已注册');
+
+  // ① 关键回归：不得再拒成"未登记会话"
+  const value = await writeTool.execute(
+    { entries: [{ kind: 'fact', title: '恢复会话应当能写长期记忆' }] },
+    { agent: revived, signal: new AbortController().signal },
+  );
+  assert.equal(value.ok, true, `恢复的顶层会话写入必须成功（实际：${JSON.stringify(value)}）`);
+
+  // ② 兜底是一次性的：放行时补登记，后续调用走白名单快路径（不再重复判定）
+  const second = await writeTool.execute(
+    { entries: [{ kind: 'fact', title: '兜底放行后应补登记进白名单' }] },
+    { agent: revived, signal: new AbortController().signal },
+  );
+  assert.equal(second.ok, true, '补登记后第二次写入同样必须成功');
+});
+
+test('兜底不得放宽口径：真子代理与未知 lineage 仍被拒绝写入', async () => {
+  const workspace = makeWorkspace();
+  const host = makeHost();
+  apply(host.ctx, resolveConfig({}).config);
+  const writeTool = host.tools.find((definition) => definition.name === 'memory_write');
+  assert.ok(writeTool, 'memory_write 必须已注册');
+
+  // 真子代理：origin=subagent（未走 agent/created，直接执行也要被硬拒）
+  const sub = makeAgent('s-subagent-x', workspace, { origin: 'subagent', delegationDepth: 1 });
+  await assert.rejects(
+    () =>
+      writeTool.execute(
+        { entries: [{ kind: 'fact', title: '子代理不得写入' }] },
+        { agent: sub, signal: new AbortController().signal },
+      ),
+    /拒绝执行/,
+    '真子代理必须被 isSubagent 硬拒，兜底不得放行',
+  );
+
+  // 只有 delegationDepth>0（第三方 provider 可能不写 origin）同样硬拒
+  const deep = makeAgent('s-depth-x', workspace, { delegationDepth: 2 });
+  await assert.rejects(
+    () =>
+      writeTool.execute(
+        { entries: [{ kind: 'fact', title: '深层子代理不得写入' }] },
+        { agent: deep, signal: new AbortController().signal },
+      ),
+    /拒绝执行/,
+    'delegationDepth>0 必须被硬拒',
+  );
+
+  // 未知 lineage（有 parentSession、isSeeded 不明确）：isExplicitTopLevel 不成立 → 仍拒绝
+  const weird = makeAgent('s-weird-x', workspace, { parentSession: 's-someone' });
+  await assert.rejects(
+    () =>
+      writeTool.execute(
+        { entries: [{ kind: 'fact', title: '未知 lineage 不得写入' }] },
+        { agent: weird, signal: new AbortController().signal },
+      ),
+    /拒绝执行/,
+    '未知 lineage 必须继续拒绝（兜底只认显式顶层）',
+  );
+});
+
 test('交付提醒：交付轮提醒一次，纯问答不提醒，同轮不重复', async () => {
   const workspace = makeWorkspace();
   const host = makeHost();

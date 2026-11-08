@@ -138,14 +138,35 @@ export function apply(ctx, rawConfig) {
     now: () => new Date(),
     /** 子代理判定（工具层用它区分"子代理只读搜索"与"未登记会话"）。 */
     isSubagent,
-    /** 该 agent 是否是被允许的主会话（写入类工具的执行层第二道防线）。 */
-    /** @param {import('../types/dsh.d.ts').Agent|undefined} agent */
+    /**
+     * 该 agent 是否是被允许的主会话（写入类工具的执行层第二道防线）。
+     *
+     * **白名单 + 现场 header 兜底**（2026-11-08 真机 P0）：
+     * 只用内存白名单会让「恢复/重开的会话」永久失效——白名单只在 `agent/created` 里 `add`、
+     * 在 `agent/disposed` 里 `remove`，一旦某次边界提前 return（或宿主用同 id 重建却没再
+     * 走到 add），这个 id 就永远不在表里：**工具仍然可见**（没走 restrict），但每次调用都被
+     * 这里拒成「未登记会话」，而且注入也一起消失。用户看到的现象就是"记忆工具坏了 / 被当成子代理"。
+     *
+     * 兜底判据必须与边界准入**同一个函数**：`isExplicitTopLevel` 是本仓库唯一的
+     * "显式顶层"正向判定（`delegationDepth === 0`、无 `origin`、`parentSession` 只能是 fork 顶层），
+     * 因此兜底不会放宽口径——真子代理带 `origin === 'subagent'` 或 `delegationDepth > 0`，
+     * 前面那行 `isSubagent` 已经硬拒。失败方向仍是"拒绝写入"。
+     *
+     * @param {import('../types/dsh.d.ts').Agent|undefined} agent
+     */
     isAllowedSession: (agent) => {
       const sessionId = agent?.id;
       if (typeof sessionId !== 'string') return false;
       if (config.includeSubagents === true) return true;
-      if (isSubagent(agent?.session?.header)) return false;
-      return allowlist.has(sessionId);
+      const header = agent?.session?.header;
+      if (isSubagent(header)) return false;
+      if (allowlist.has(sessionId)) return true;
+      // 兜底：白名单漏登记时，用现场 header 的显式顶层正向特征放行（并补登记，省掉后续重复判定）。
+      if (isExplicitTopLevel(header)) {
+        allowlist.add(sessionId);
+        return true;
+      }
+      return false;
     },
     /** 取出并清空本会话的边界告警（工具返回里带出一次）。 */
     /** @param {string} sessionId */
